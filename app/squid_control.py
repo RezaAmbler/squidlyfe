@@ -397,6 +397,14 @@ def read_logging_config() -> Dict[str, Any]:
             if key not in config['logging']:
                 config['logging'][key] = value
 
+        # Merge DNS defaults if missing
+        if 'dns' not in config:
+            config['dns'] = default['dns']
+        else:
+            for key, value in default['dns'].items():
+                if key not in config['dns']:
+                    config['dns'][key] = value
+
         logger.debug("Successfully read logging configuration")
         return config
 
@@ -464,6 +472,9 @@ def get_default_logging_config() -> Dict[str, Any]:
             'syslog_protocol': 'udp',
             'access_log_path': '/var/log/squid/access.log',
             'cache_log_path': '/var/log/squid/cache.log'
+        },
+        'dns': {
+            'nameservers': ['1.1.1.1', '8.8.8.8']
         }
     }
 
@@ -506,9 +517,28 @@ access_log stdio:/dev/stdout squid"""
         else:  # local_file
             log_config = "access_log /var/log/squid/access.log squid"
 
+        # Get DNS nameservers configuration
+        dns_config = config.get('dns', {})
+        dns_nameservers = dns_config.get('nameservers', ['1.1.1.1', '8.8.8.8'])
+
+        # Validate and sanitize DNS nameservers
+        if not isinstance(dns_nameservers, list) or len(dns_nameservers) == 0:
+            logger.warning("Invalid DNS nameservers, using defaults")
+            dns_nameservers = ['1.1.1.1', '8.8.8.8']
+
+        # Filter out empty strings and limit to 4 nameservers
+        dns_nameservers = [ns.strip() for ns in dns_nameservers if ns and isinstance(ns, str)][:4]
+
+        # Fallback to defaults if no valid nameservers
+        if not dns_nameservers:
+            dns_nameservers = ['1.1.1.1', '8.8.8.8']
+
+        dns_nameservers_str = ' '.join(dns_nameservers)
+
         # Substitute template variables
         squid_config = template.replace('{{LOGGING_CONFIG}}', log_config)
         squid_config = squid_config.replace('{{WHITELIST_PATH}}', WHITELIST_PATH)
+        squid_config = squid_config.replace('{{DNS_NAMESERVERS}}', dns_nameservers_str)
 
         # Write to temporary file first
         temp_fd, temp_path = tempfile.mkstemp(

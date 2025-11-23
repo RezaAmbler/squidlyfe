@@ -482,6 +482,7 @@ def logging_config():
             syslog_host = request.form.get('syslog_host', '').strip()
             syslog_port = request.form.get('syslog_port', '514').strip()
             syslog_protocol = request.form.get('syslog_protocol', 'udp')
+            dns_nameservers_input = request.form.get('dns_nameservers', '').strip()
 
             # Validate syslog settings if mode is remote_syslog
             if logging_mode == 'remote_syslog':
@@ -497,6 +498,31 @@ def logging_config():
                     flash('Syslog port must be a valid number between 1 and 65535.', 'danger')
                     return redirect(url_for('logging_config'))
 
+            # Parse and validate DNS nameservers
+            dns_nameservers = []
+            if dns_nameservers_input:
+                # Split on spaces or commas
+                raw_nameservers = re.split(r'[,\s]+', dns_nameservers_input)
+                # Filter and validate
+                import ipaddress
+                for ns in raw_nameservers:
+                    ns = ns.strip()
+                    if not ns:
+                        continue
+                    try:
+                        # Validate IPv4 or IPv6 address
+                        ipaddress.ip_address(ns)
+                        dns_nameservers.append(ns)
+                        if len(dns_nameservers) >= 4:
+                            break  # Limit to 4 nameservers
+                    except ValueError:
+                        logger.warning(f"Invalid DNS nameserver '{ns}' ignored")
+
+            # Use defaults if no valid nameservers provided
+            if not dns_nameservers:
+                dns_nameservers = ['1.1.1.1', '8.8.8.8']
+                logger.info("No valid DNS nameservers provided, using defaults")
+
             # Build config dictionary
             config = {
                 'logging': {
@@ -504,6 +530,9 @@ def logging_config():
                     'syslog_host': syslog_host,
                     'syslog_port': syslog_port,
                     'syslog_protocol': syslog_protocol
+                },
+                'dns': {
+                    'nameservers': dns_nameservers
                 }
             }
 
@@ -544,6 +573,9 @@ def logging_config():
                 'syslog_host': '',
                 'syslog_port': '514',
                 'syslog_protocol': 'udp'
+            },
+            'dns': {
+                'nameservers': ['1.1.1.1', '8.8.8.8']
             }
         }
 

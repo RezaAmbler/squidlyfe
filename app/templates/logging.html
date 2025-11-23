@@ -78,6 +78,22 @@
                 </div>
             </div>
 
+            <div class="form-group" style="margin-top: 2rem;">
+                <h3>DNS Configuration</h3>
+                <label for="dns_nameservers">DNS Nameservers</label>
+                <input
+                    type="text"
+                    id="dns_nameservers"
+                    name="dns_nameservers"
+                    class="form-input"
+                    value="{{ config.dns.nameservers|join(' ') }}"
+                    placeholder="1.1.1.1 8.8.8.8"
+                >
+                <small class="form-help">
+                    Space-separated list of DNS server IPs (max 4). Default: 1.1.1.1 8.8.8.8
+                </small>
+            </div>
+
             <div class="form-actions">
                 <button type="submit" class="btn btn-primary">Save Configuration</button>
             </div>
@@ -105,6 +121,12 @@
                 </td>
             </tr>
             {% endif %}
+            <tr>
+                <th>DNS Nameservers:</th>
+                <td>
+                    <code>{{ config.dns.nameservers|join(', ') }}</code>
+                </td>
+            </tr>
         </table>
     </div>
 </div>

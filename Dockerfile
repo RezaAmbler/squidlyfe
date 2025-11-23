@@ -45,6 +45,9 @@ COPY squid/squid.conf.template /etc/squid/squid.conf.template
 # Make entrypoint script executable
 RUN chmod +x /app/entrypoint.sh
 
+# Ensure appuser can read Squid configuration template
+RUN chmod 644 /etc/squid/squid.conf.template
+
 # ==============================================================================
 # Create necessary directories and set permissions
 # ==============================================================================

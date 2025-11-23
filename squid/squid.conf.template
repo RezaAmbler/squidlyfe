@@ -122,7 +122,7 @@ refresh_pattern .               0       20%     4320
 # ==============================================================================
 
 # DNS configuration
-dns_nameservers 1.1.1.1 8.8.8.8
+dns_nameservers {{DNS_NAMESERVERS}}
 
 # Connection timeouts
 connect_timeout 30 seconds
