@@ -15,7 +15,7 @@ services:
       # Admin credentials - CHANGE THESE!
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=changeme
-
+      - DISABLE_SECURE_COOKIES=true   # allow session cookies over HTTP
       # Optional: Custom secret key for Flask sessions
       # - SECRET_KEY=your-secret-key-here
 

@@ -62,7 +62,8 @@ RUN mkdir -p /var/log/squid && \
 # This user will run the Flask web application via gunicorn
 # Squid will continue to run as the 'proxy' user (created by squid package)
 RUN groupadd -g 1000 appuser && \
-    useradd -u 1000 -g appuser -s /bin/bash -m appuser
+    useradd -u 1000 -g appuser -s /bin/bash -m appuser && \
+    usermod -aG proxy appuser
 
 # Set ownership of application files to appuser
 RUN chown -R appuser:appuser /app

@@ -93,6 +93,13 @@ def get_or_create_secret_key() -> bytes:
 # Load secret key (stable across workers and restarts)
 app.secret_key = get_or_create_secret_key()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Security: Configure secure session cookies
 # SESSION_COOKIE_SECURE requires HTTPS; set to False if TLS termination is external
 # Override with DISABLE_SECURE_COOKIES env var for development only
@@ -102,13 +109,6 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('DISABLE_SECURE_COOKIES', '
 
 if not app.config['SESSION_COOKIE_SECURE']:
     logger.warning("SESSION_COOKIE_SECURE is disabled. Enable HTTPS/TLS termination for production.")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 
 # CSRF Protection

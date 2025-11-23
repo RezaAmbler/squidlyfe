@@ -380,6 +380,20 @@ if [ -f /data/.secret_key ]; then
     chmod 600 /data/.secret_key
 fi
 
+# Fix permissions for Squid logs and whitelist access
+# appuser needs to read Squid logs for the log viewer
+chmod -R g+r /var/log/squid 2>/dev/null || true
+
+# appuser needs to write to /etc/squid for temp files during whitelist updates
+chown -R proxy:proxy /etc/squid 2>/dev/null || true
+chmod 775 /etc/squid 2>/dev/null || true
+
+# Ensure whitelist file is writable by appuser (member of proxy group)
+if [ -f /data/whitelist.txt ]; then
+    chown proxy:proxy /data/whitelist.txt 2>/dev/null || true
+    chmod 664 /data/whitelist.txt 2>/dev/null || true
+fi
+
 exec gosu appuser gunicorn \
     --bind 0.0.0.0:8080 \
     --workers 2 \
