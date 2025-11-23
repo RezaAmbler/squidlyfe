@@ -19,7 +19,8 @@ RUN apt-get update && \
         python3-yaml \
         ca-certificates \
         procps \
-        curl && \
+        curl \
+        gosu && \
     rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
@@ -52,6 +53,24 @@ RUN mkdir -p /var/log/squid && \
     mkdir -p /var/run && \
     chmod 755 /var/log/squid && \
     chmod 755 /var/spool/squid
+
+# ==============================================================================
+# Create non-root user for Flask application
+# ==============================================================================
+
+# Create appuser with UID 1000 (common for first user on most systems)
+# This user will run the Flask web application via gunicorn
+# Squid will continue to run as the 'proxy' user (created by squid package)
+RUN groupadd -g 1000 appuser && \
+    useradd -u 1000 -g appuser -s /bin/bash -m appuser
+
+# Set ownership of application files to appuser
+RUN chown -R appuser:appuser /app
+
+# Ensure appuser can write to necessary directories
+# Note: /data volume permissions will be handled at runtime in entrypoint.sh
+RUN mkdir -p /data && \
+    chown -R appuser:appuser /data
 
 # ==============================================================================
 # Expose ports

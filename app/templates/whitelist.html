@@ -15,6 +15,7 @@
     <div class="card-body">
         <form method="POST" action="{{ url_for('whitelist') }}" class="add-form">
             <input type="hidden" name="action" value="add">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="form-row">
                 <div class="form-group flex-grow">
                     <label for="new_entry">Domain or URL</label>
@@ -48,6 +49,7 @@
         {% if entries %}
         <form method="POST" action="{{ url_for('whitelist') }}">
             <input type="hidden" name="action" value="remove">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
             <div class="whitelist-controls">
                 <button type="submit" class="btn btn-danger" onclick="return confirm('Remove selected entries?')">

@@ -365,12 +365,22 @@ echo "Config:    $DATA_DIR/config.yaml"
 echo "============================================"
 echo ""
 
-# Start Flask application using gunicorn
+# Start Flask application using gunicorn as non-root user
 # This runs in the foreground and keeps the container alive
-echo "Starting web UI..."
+# Security: Use gosu to drop privileges from root to appuser
+echo "Starting web UI as user 'appuser'..."
 cd /app
 
-exec gunicorn \
+# Ensure appuser has access to /data directory (for mounted volumes)
+chown -R appuser:appuser /data 2>/dev/null || true
+
+# Ensure appuser can read the session secret key if it exists
+if [ -f /data/.secret_key ]; then
+    chown appuser:appuser /data/.secret_key
+    chmod 600 /data/.secret_key
+fi
+
+exec gosu appuser gunicorn \
     --bind 0.0.0.0:8080 \
     --workers 2 \
     --threads 4 \

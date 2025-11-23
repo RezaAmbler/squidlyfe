@@ -60,15 +60,28 @@ class TestFlaskUIRemoval(unittest.TestCase):
 
     def test_removal_with_valid_session_no_redirect_to_login(self):
         """Test that removing entries while logged in does NOT redirect to login"""
-        # Log in first
+        import re
+
+        # Get CSRF token from login page
+        response = self.client.get('/login')
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.data.decode('utf-8'))
+        csrf_token = match.group(1) if match else ''
+
+        # Log in first with CSRF token
         response = self.client.post('/login', data={
             'username': 'admin',
-            'password': 'test123'
+            'password': 'test123',
+            'csrf_token': csrf_token
         }, follow_redirects=False)
 
         # Should redirect to whitelist page after login
         self.assertEqual(response.status_code, 302)
         self.assertIn('/whitelist', response.location)
+
+        # Get CSRF token from whitelist page
+        response = self.client.get('/whitelist')
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.data.decode('utf-8'))
+        csrf_token = match.group(1) if match else ''
 
         # Read initial whitelist
         initial_entries = squid_control.read_whitelist()
@@ -76,10 +89,11 @@ class TestFlaskUIRemoval(unittest.TestCase):
         self.assertIn('example.com', initial_entries)
         self.assertIn('microsoft.com', initial_entries)
 
-        # Perform removal
+        # Perform removal with CSRF token
         response = self.client.post('/whitelist', data={
             'action': 'remove',
-            'remove_entries': ['example.com', 'microsoft.com']
+            'remove_entries': ['example.com', 'microsoft.com'],
+            'csrf_token': csrf_token
         }, follow_redirects=False)
 
         # CRITICAL: Should redirect to /whitelist, NOT /login
@@ -96,16 +110,29 @@ class TestFlaskUIRemoval(unittest.TestCase):
 
     def test_removal_persists_across_requests(self):
         """Test that removal persists and is visible in subsequent requests"""
-        # Log in
+        import re
+
+        # Get CSRF token and log in
+        response = self.client.get('/login')
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.data.decode('utf-8'))
+        csrf_token = match.group(1) if match else ''
+
         self.client.post('/login', data={
             'username': 'admin',
-            'password': 'test123'
+            'password': 'test123',
+            'csrf_token': csrf_token
         })
 
-        # Remove entries
+        # Get CSRF token for whitelist operation
+        response = self.client.get('/whitelist')
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.data.decode('utf-8'))
+        csrf_token = match.group(1) if match else ''
+
+        # Remove entries with CSRF token
         self.client.post('/whitelist', data={
             'action': 'remove',
-            'remove_entries': ['microsoft.com']
+            'remove_entries': ['microsoft.com'],
+            'csrf_token': csrf_token
         })
 
         # Make a new GET request to whitelist page

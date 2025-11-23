@@ -3,10 +3,16 @@ Squid Whitelist Proxy - Web UI Application
 Provides a web interface for managing Squid proxy whitelist and logging configuration.
 """
 
-from flask import Flask, render_template, request, redirect, url_for, flash, session
+from flask import Flask, render_template, request, redirect, url_for, flash, session, abort
 from functools import wraps
 import os
 import logging
+import secrets
+import hmac
+import hashlib
+import re
+from collections import defaultdict
+import time
 
 from config import load_config
 from squid_control import (
@@ -23,6 +29,11 @@ from squid_control import (
 )
 
 app = Flask(__name__)
+
+# Simple rate limiting for login attempts (in-memory)
+login_attempts = defaultdict(list)
+MAX_LOGIN_ATTEMPTS = 5
+RATE_LIMIT_WINDOW = 300  # 5 minutes
 
 
 def get_or_create_secret_key() -> bytes:
@@ -82,12 +93,149 @@ def get_or_create_secret_key() -> bytes:
 # Load secret key (stable across workers and restarts)
 app.secret_key = get_or_create_secret_key()
 
+# Security: Configure secure session cookies
+# SESSION_COOKIE_SECURE requires HTTPS; set to False if TLS termination is external
+# Override with DISABLE_SECURE_COOKIES env var for development only
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('DISABLE_SECURE_COOKIES', '').lower() != 'true'
+
+if not app.config['SESSION_COOKIE_SECURE']:
+    logger.warning("SESSION_COOKIE_SECURE is disabled. Enable HTTPS/TLS termination for production.")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+# CSRF Protection
+def generate_csrf_token():
+    """Generate a CSRF token and store it in the session"""
+    if 'csrf_token' not in session:
+        session['csrf_token'] = secrets.token_hex(32)
+    return session['csrf_token']
+
+
+def validate_csrf_token(token):
+    """Validate CSRF token using constant-time comparison"""
+    if 'csrf_token' not in session:
+        return False
+    return hmac.compare_digest(session['csrf_token'], token)
+
+
+# Make csrf_token available in all templates
+@app.context_processor
+def inject_csrf_token():
+    return dict(csrf_token=generate_csrf_token)
+
+
+# Security: Input validation for whitelist entries
+def validate_domain_input(entry: str) -> bool:
+    """
+    Validate that a whitelist entry looks like a valid domain.
+
+    Accepts:
+    - Bare domains: example.com, api.github.com
+    - Wildcard domains: .example.com, *.example.com
+
+    Rejects:
+    - Special characters except . - *
+    - Strings with spaces or control characters
+    - Strings that don't look like domains
+
+    Args:
+        entry: User input string
+
+    Returns:
+        True if valid, False otherwise
+    """
+    if not entry or len(entry) > 255:
+        return False
+
+    # Strip http://, https://, paths (normalization will handle this too)
+    cleaned = entry.strip()
+    for prefix in ['https://', 'http://']:
+        if cleaned.lower().startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+
+    if '/' in cleaned:
+        cleaned = cleaned.split('/')[0]
+
+    # Check for wildcard prefix
+    if cleaned.startswith('*.'):
+        cleaned = cleaned[2:]
+    elif cleaned.startswith('.'):
+        cleaned = cleaned[1:]
+
+    # Validate domain pattern: alphanumeric, hyphens, dots
+    # Must not be empty, no spaces, no special chars except hyphen and dot
+    domain_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$')
+
+    if not domain_pattern.match(cleaned):
+        return False
+
+    # Additional checks
+    if '..' in cleaned or cleaned.startswith('.') or cleaned.endswith('.'):
+        return False
+
+    # Reject if contains invalid characters
+    if any(char in cleaned for char in ['#', '$', '@', '!', '%', '^', '&', '*', '(', ')', '=', '+', '[', ']', '{', '}', '|', '\\', ';', ':', '"', "'", '<', '>', '?', ',', ' ']):
+        return False
+
+    return True
+
+
+# Security: Check if default password is in use
+def is_using_default_password():
+    """Check if the admin password is still set to the default 'changeme'"""
+    admin_password = os.environ.get('ADMIN_PASSWORD', 'changeme')
+    return admin_password == 'changeme'
+
+
+# Security: Rate limiting for login attempts
+def check_rate_limit(ip_address: str) -> bool:
+    """
+    Check if IP address has exceeded login attempt rate limit.
+
+    Args:
+        ip_address: Client IP address
+
+    Returns:
+        True if under limit, False if rate limited
+    """
+    now = time.time()
+
+    # Clean old attempts
+    login_attempts[ip_address] = [
+        attempt_time for attempt_time in login_attempts[ip_address]
+        if now - attempt_time < RATE_LIMIT_WINDOW
+    ]
+
+    # Check if limit exceeded
+    if len(login_attempts[ip_address]) >= MAX_LOGIN_ATTEMPTS:
+        return False
+
+    return True
+
+
+def record_login_attempt(ip_address: str):
+    """Record a failed login attempt"""
+    login_attempts[ip_address].append(time.time())
+
+
+# Security: Add security headers to all responses
+@app.after_request
+def set_security_headers(response):
+    """Add security headers to all responses"""
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
+    response.headers['Permissions-Policy'] = 'camera=(), microphone=(), geolocation=()'
+    return response
 
 
 # Authentication decorator
@@ -113,7 +261,26 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page and authentication handler"""
+    # Security: Warn if using default password
+    if is_using_default_password():
+        flash('Security Warning: Default password "changeme" is in use. Set ADMIN_PASSWORD environment variable to a secure password for production.', 'warning')
+        logger.warning("Default password 'changeme' is still in use")
+
     if request.method == 'POST':
+        # Security: Validate CSRF token
+        csrf_token = request.form.get('csrf_token', '')
+        if not validate_csrf_token(csrf_token):
+            flash('Security Error: Invalid CSRF token. Please try again.', 'danger')
+            logger.warning("Login attempt with invalid CSRF token")
+            abort(403)
+
+        # Security: Rate limiting
+        client_ip = request.remote_addr or 'unknown'
+        if not check_rate_limit(client_ip):
+            flash('Too many failed login attempts. Please try again in 5 minutes.', 'danger')
+            logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+            return render_template('login.html'), 429
+
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
 
@@ -124,12 +291,16 @@ def login():
         if username == admin_username and password == admin_password:
             session['logged_in'] = True
             session['username'] = username
+            # Regenerate session ID to prevent session fixation
+            session.permanent = True
             flash('Successfully logged in!', 'success')
-            logger.info(f"User '{username}' logged in successfully")
+            logger.info(f"User '{username}' logged in successfully from IP {client_ip}")
             return redirect(url_for('whitelist'))
         else:
+            # Security: Record failed attempt
+            record_login_attempt(client_ip)
             flash('Invalid username or password.', 'danger')
-            logger.warning(f"Failed login attempt for username '{username}'")
+            logger.warning(f"Failed login attempt for username '{username}' from IP {client_ip}")
 
     return render_template('login.html')
 
@@ -149,6 +320,13 @@ def logout():
 def whitelist():
     """Whitelist management page"""
     if request.method == 'POST':
+        # Security: Validate CSRF token
+        csrf_token = request.form.get('csrf_token', '')
+        if not validate_csrf_token(csrf_token):
+            flash('Security Error: Invalid CSRF token. Please try again.', 'danger')
+            logger.warning(f"Whitelist operation with invalid CSRF token from user '{session.get('username')}'")
+            abort(403)
+
         action = request.form.get('action')
 
         if action == 'add':
@@ -159,6 +337,10 @@ def whitelist():
                 flash('Please enter a domain or URL.', 'warning')
             elif '\n' in new_entry or '\r' in new_entry:
                 flash('Only one domain per entry allowed.', 'danger')
+            # Security: Validate domain input format
+            elif not validate_domain_input(new_entry):
+                flash('Invalid domain format. Please enter a valid domain (e.g., example.com or .example.com for wildcards).', 'danger')
+                logger.warning(f"User '{session['username']}' attempted to add invalid domain format: '{new_entry}'")
             else:
                 try:
                     # Read current whitelist
@@ -287,6 +469,13 @@ def whitelist():
 def logging_config():
     """Logging configuration page"""
     if request.method == 'POST':
+        # Security: Validate CSRF token
+        csrf_token = request.form.get('csrf_token', '')
+        if not validate_csrf_token(csrf_token):
+            flash('Security Error: Invalid CSRF token. Please try again.', 'danger')
+            logger.warning(f"Logging config change with invalid CSRF token from user '{session.get('username')}'")
+            abort(403)
+
         try:
             # Get form data
             logging_mode = request.form.get('logging_mode', 'local_file')
