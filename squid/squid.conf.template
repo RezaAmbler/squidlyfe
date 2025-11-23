@@ -1,0 +1,171 @@
+# Squid Proxy Configuration - Whitelist-Only Access Control
+# This configuration implements a strict allow-only model for web access
+# Managed by Squid Proxy Manager Web UI
+
+# ==============================================================================
+# NETWORK CONFIGURATION
+# ==============================================================================
+
+# Listen on port 3128 for HTTP proxy requests
+http_port 3128
+
+# ==============================================================================
+# LOGGING CONFIGURATION
+# ==============================================================================
+
+# Access logging - this line is replaced by the template system
+# Mode is controlled via the web UI: local_file, stdout, or remote_syslog
+{{LOGGING_CONFIG}}
+
+# Cache log (informational messages about cache operations)
+cache_log /var/log/squid/cache.log
+
+# ==============================================================================
+# ACCESS CONTROL LISTS (ACLs)
+# ==============================================================================
+
+# Define localhost network for health checks and local management
+acl localnet src 127.0.0.1/32
+acl localhost src 127.0.0.1/32
+
+# SSL ports for CONNECT method
+acl SSL_ports port 443
+
+# Safe ports - standard HTTP/HTTPS ports
+acl Safe_ports port 80          # HTTP
+acl Safe_ports port 443         # HTTPS
+
+# CONNECT method used for SSL
+acl CONNECT method CONNECT
+
+# Whitelist ACL - reads allowed domains/URLs from external file
+# This file is managed by the web UI and contains one domain per line
+# Examples: example.com, .example.com (matches all subdomains)
+acl allowed_sites dstdomain "{{WHITELIST_PATH}}"
+
+# ==============================================================================
+# ACCESS CONTROL RULES (ORDER MATTERS!)
+# ==============================================================================
+
+# Deny requests to non-safe ports
+http_access deny !Safe_ports
+
+# Deny CONNECT to non-SSL ports
+http_access deny CONNECT !SSL_ports
+
+# Allow localhost access (for health checks and local testing)
+http_access allow localhost
+
+# Allow access ONLY to whitelisted sites
+http_access allow allowed_sites
+
+# Deny everything else by default (strict deny-all policy)
+http_access deny all
+
+# ==============================================================================
+# CACHE CONFIGURATION
+# ==============================================================================
+
+# Disable caching (this is a filtering proxy, not a caching proxy)
+# For a pure allow-list proxy, caching is typically not needed
+cache deny all
+
+# Cache directory (minimal, for temp storage even with caching disabled)
+cache_dir ufs /var/spool/squid 100 16 256
+
+# ==============================================================================
+# ANONYMIZATION / PRIVACY
+# ==============================================================================
+
+# Remove client IP from forwarded headers (improve privacy)
+forwarded_for off
+
+# Remove proxy-related headers from requests
+request_header_access X-Forwarded-For deny all
+request_header_access Via deny all
+request_header_access Cache-Control deny all
+request_header_access From deny all
+
+# Remove proxy-related headers from replies
+reply_header_access X-Forwarded-For deny all
+reply_header_access Via deny all
+
+# ==============================================================================
+# PROCESS CONFIGURATION
+# ==============================================================================
+
+# Process ID file - stored in cache dir to avoid permission issues
+pid_filename /var/spool/squid/squid.pid
+
+# Coredump directory (for debugging if needed)
+coredump_dir /var/spool/squid
+
+# Maximum object size (not critical since caching is disabled)
+maximum_object_size 4096 KB
+
+# Refresh patterns (minimal, since caching is disabled)
+refresh_pattern ^ftp:           1440    20%     10080
+refresh_pattern ^gopher:        1440    0%      1440
+refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+refresh_pattern .               0       20%     4320
+
+# ==============================================================================
+# ERROR PAGES
+# ==============================================================================
+
+# Use default Squid error pages
+# When access is denied, users will see the ERR_ACCESS_DENIED page
+# which can be customized in /usr/share/squid/errors/ if needed
+
+# ==============================================================================
+# PERFORMANCE TUNING
+# ==============================================================================
+
+# DNS configuration
+dns_nameservers 8.8.8.8 8.8.4.4
+
+# Connection timeouts
+connect_timeout 30 seconds
+read_timeout 15 minutes
+request_timeout 5 minutes
+
+# Client connections
+client_lifetime 1 hours
+
+# ==============================================================================
+# SECURITY
+# ==============================================================================
+
+# Deny TRACE method (security best practice)
+acl TRACE method TRACE
+http_access deny TRACE
+
+# HTTP reply headers security
+reply_header_access X-Cache deny all
+reply_header_access X-Cache-Lookup deny all
+
+# ==============================================================================
+# NOTES
+# ==============================================================================
+
+# How the whitelist works:
+# 1. The 'allowed_sites' ACL reads from {{WHITELIST_PATH}}
+# 2. This file contains one domain per line (e.g., example.com, .example.com)
+# 3. Domains starting with '.' match all subdomains (e.g., .example.com matches foo.example.com)
+# 4. The 'http_access allow allowed_sites' rule permits ONLY whitelisted sites
+# 5. All other requests are denied by the final 'http_access deny all' rule
+#
+# To modify the whitelist:
+# - Use the web UI at http://<proxy-ip>:8080
+# - Or manually edit {{WHITELIST_PATH}} and run: squid -k reconfigure
+#
+# Logging modes:
+# - local_file: Logs to /var/log/squid/access.log
+# - stdout: Logs to container stdout (for Docker log collection)
+# - remote_syslog: Logs to stdout with metadata for external log shippers
+#
+# To reload configuration after manual changes:
+#   squid -k reconfigure
+#
+# To verify configuration syntax:
+#   squid -k parse

@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}Whitelist Management - Squid Proxy Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Whitelist Management</h1>
+    <p>Manage allowed domains and URLs for proxy access</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Add New Entry</h2>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('whitelist') }}" class="add-form">
+            <input type="hidden" name="action" value="add">
+            <div class="form-row">
+                <div class="form-group flex-grow">
+                    <label for="new_entry">Domain or URL</label>
+                    <input
+                        type="text"
+                        id="new_entry"
+                        name="new_entry"
+                        class="form-input"
+                        placeholder="e.g., example.com or .example.com"
+                        required
+                    >
+                    <small class="form-help">
+                        Enter a domain (e.g., <code>example.com</code>) or domain pattern (e.g., <code>.example.com</code> for all subdomains)
+                    </small>
+                </div>
+                <div class="form-group">
+                    <label>&nbsp;</label>
+                    <button type="submit" class="btn btn-primary">Add to Whitelist</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Current Whitelist</h2>
+        <span class="badge">{{ entries|length }} entries</span>
+    </div>
+    <div class="card-body">
+        {% if entries %}
+        <form method="POST" action="{{ url_for('whitelist') }}">
+            <input type="hidden" name="action" value="remove">
+
+            <div class="whitelist-controls">
+                <button type="submit" class="btn btn-danger" onclick="return confirm('Remove selected entries?')">
+                    Remove Selected
+                </button>
+            </div>
+
+            <div class="whitelist-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="50">
+                                <input type="checkbox" id="select-all" onchange="toggleAll(this)">
+                            </th>
+                            <th>Domain/URL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in entries %}
+                        <tr>
+                            <td>
+                                <input
+                                    type="checkbox"
+                                    name="remove_entries"
+                                    value="{{ entry }}"
+                                    class="entry-checkbox"
+                                >
+                            </td>
+                            <td class="entry-text">{{ entry }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </form>
+        {% else %}
+        <div class="empty-state">
+            <p>No entries in whitelist. Add domains above to allow proxy access.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<script>
+    function toggleAll(checkbox) {
+        const checkboxes = document.querySelectorAll('.entry-checkbox');
+        checkboxes.forEach(cb => cb.checked = checkbox.checked);
+    }
+</script>
+{% endblock %}

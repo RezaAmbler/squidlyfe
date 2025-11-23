@@ -1,0 +1,14 @@
+# Squid Whitelist Proxy - Python Dependencies
+
+# Web framework
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# WSGI server for production
+gunicorn==21.2.0
+
+# YAML parsing for configuration files
+PyYAML==6.0.1
+
+# Optional: For better session security (if needed)
+# Flask-WTF==1.2.1

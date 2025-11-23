@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+.cache/
+
+# Virtualenvs
+venv/
+.venv/
+env/
+.env/
+
+# OS / Editors
+.DS_Store
+.idea/
+.vscode/
+
+# Build / Temp / Logs
+build/
+dist/
+tmp/
+*.log
+*.tmp
+
+# Docker / Compose overrides
+docker-compose.override.yml
+
+# Runtime data (persisted state, not for git)
+data/whitelist.txt
+data/config.yaml
+data/.secret_key
+data/squid-cache/
+
+# LLM / scratch / local notes
+.claude/
+CLAUDE.md.bak
+*.scratch.md
+*.notes.md
+CLAUDE.md
+AGENTS.md

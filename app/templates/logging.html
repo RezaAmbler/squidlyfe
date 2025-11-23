@@ -1,0 +1,283 @@
+{% extends "base.html" %}
+
+{% block title %}Logging Configuration - Squid Proxy Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Logging Configuration</h1>
+    <p>Configure where Squid proxy logs are stored and forwarded</p>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Log Destination Settings</h2>
+    </div>
+    <div class="card-body">
+        <form method="POST" action="{{ url_for('logging_config') }}">
+            <div class="form-group">
+                <label for="logging_mode">Logging Mode</label>
+                <select id="logging_mode" name="logging_mode" class="form-input" onchange="toggleSyslogFields()">
+                    <option value="local_file" {% if config.logging.mode == 'local_file' %}selected{% endif %}>
+                        Local File (/var/log/squid/access.log)
+                    </option>
+                    <option value="stdout" {% if config.logging.mode == 'stdout' %}selected{% endif %}>
+                        Standard Output (for container log collection)
+                    </option>
+                    <option value="remote_syslog" {% if config.logging.mode == 'remote_syslog' %}selected{% endif %}>
+                        Remote Syslog (via external log shipper)
+                    </option>
+                </select>
+                <small class="form-help">
+                    Choose where Squid access logs should be sent
+                </small>
+            </div>
+
+            <div id="syslog-fields" class="syslog-section" style="display: none;">
+                <h3>Remote Syslog Settings</h3>
+                <p class="info-text">
+                    <strong>Note:</strong> Squid logs to stdout in this mode. Configure an external log shipper
+                    (e.g., rsyslog, syslog-ng, Fluent Bit) to forward container logs to the specified syslog target.
+                </p>
+
+                <div class="form-group">
+                    <label for="syslog_host">Syslog Host</label>
+                    <input
+                        type="text"
+                        id="syslog_host"
+                        name="syslog_host"
+                        class="form-input"
+                        value="{{ config.logging.syslog_host }}"
+                        placeholder="syslog.example.com"
+                    >
+                    <small class="form-help">Hostname or IP address of syslog server</small>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="syslog_port">Syslog Port</label>
+                        <input
+                            type="number"
+                            id="syslog_port"
+                            name="syslog_port"
+                            class="form-input"
+                            value="{{ config.logging.syslog_port }}"
+                            min="1"
+                            max="65535"
+                            placeholder="514"
+                        >
+                    </div>
+
+                    <div class="form-group">
+                        <label for="syslog_protocol">Protocol</label>
+                        <select id="syslog_protocol" name="syslog_protocol" class="form-input">
+                            <option value="udp" {% if config.logging.syslog_protocol == 'udp' %}selected{% endif %}>UDP</option>
+                            <option value="tcp" {% if config.logging.syslog_protocol == 'tcp' %}selected{% endif %}>TCP</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-actions">
+                <button type="submit" class="btn btn-primary">Save Configuration</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2>Current Configuration</h2>
+    </div>
+    <div class="card-body">
+        <table class="config-table">
+            <tr>
+                <th>Logging Mode:</th>
+                <td>
+                    <span class="badge badge-info">{{ config.logging.mode }}</span>
+                </td>
+            </tr>
+            {% if config.logging.mode == 'remote_syslog' %}
+            <tr>
+                <th>Syslog Target:</th>
+                <td>
+                    {{ config.logging.syslog_protocol|upper }}://{{ config.logging.syslog_host }}:{{ config.logging.syslog_port }}
+                </td>
+            </tr>
+            {% endif %}
+        </table>
+    </div>
+</div>
+
+<!-- Live Log Viewer (only available in local_file mode) -->
+{% if config.logging.mode == 'local_file' %}
+<div class="card" id="log-viewer-container">
+    <div class="card-header">
+        <h2>Live Log Viewer</h2>
+    </div>
+    <div class="card-body">
+        <p class="info-text">
+            View Squid logs in near-real-time. Select a log file and click Start to begin tailing.
+        </p>
+
+        <!-- Controls -->
+        <div class="log-controls">
+            <div class="form-row" style="margin-bottom: 1rem;">
+                <div class="form-group" style="flex: 1;">
+                    <label for="log-file-select">Log File</label>
+                    <select id="log-file-select" class="form-input">
+                        <option value="access">Access Log</option>
+                        <option value="cache">Cache/Error Log</option>
+                    </select>
+                </div>
+
+                <div class="form-group" style="flex: 0 0 150px;">
+                    <label for="log-lines-count">Lines</label>
+                    <input
+                        type="number"
+                        id="log-lines-count"
+                        class="form-input"
+                        value="100"
+                        min="1"
+                        max="500"
+                        placeholder="100"
+                    >
+                </div>
+            </div>
+
+            <div class="form-row" style="margin-bottom: 1rem; align-items: center;">
+                <div style="flex: 1;">
+                    <button id="start-log-viewer" class="btn btn-success">
+                        Start
+                    </button>
+                    <button id="stop-log-viewer" class="btn btn-secondary" disabled>
+                        Stop
+                    </button>
+                    <span id="log-status" class="badge bg-secondary" style="margin-left: 1rem;">
+                        Ready
+                    </span>
+                </div>
+
+                <div class="form-group" style="flex: 0 0 auto; margin: 0;">
+                    <label style="display: flex; align-items: center; cursor: pointer;">
+                        <input
+                            type="checkbox"
+                            id="auto-scroll"
+                            checked
+                            style="margin-right: 0.5rem;"
+                        >
+                        Auto-scroll
+                    </label>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="log-filter">Filter (client-side)</label>
+                <input
+                    type="text"
+                    id="log-filter"
+                    class="form-input"
+                    placeholder="Type to filter log lines..."
+                >
+                <small class="form-help">Filter is case-insensitive and searches within displayed lines</small>
+            </div>
+        </div>
+
+        <!-- Log Display Area -->
+        <div class="log-viewer">
+            <div id="log-lines" class="log-lines" data-initialized="false">
+                <div class="text-muted">Logs will appear here...</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card">
+    <div class="card-header">
+        <h2>Live Log Viewer</h2>
+    </div>
+    <div class="card-body">
+        <div class="alert alert-info">
+            <strong>Note:</strong> Live log viewer is only available when logging mode is set to "Local File".
+            Change the logging mode above to enable this feature.
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+    function toggleSyslogFields() {
+        const mode = document.getElementById('logging_mode').value;
+        const syslogFields = document.getElementById('syslog-fields');
+
+        if (mode === 'remote_syslog') {
+            syslogFields.style.display = 'block';
+            document.getElementById('syslog_host').required = true;
+        } else {
+            syslogFields.style.display = 'none';
+            document.getElementById('syslog_host').required = false;
+        }
+    }
+
+    // Initialize on page load
+    toggleSyslogFields();
+</script>
+
+<!-- Load log viewer JavaScript -->
+<script src="{{ url_for('static', filename='logs.js') }}"></script>
+
+<style>
+    .log-viewer {
+        margin-top: 1.5rem;
+        border: 1px solid #dee2e6;
+        border-radius: 4px;
+        background-color: #1e1e1e;
+        max-height: 600px;
+        overflow-y: auto;
+    }
+
+    .log-lines {
+        padding: 1rem;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 0.85rem;
+        color: #d4d4d4;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+    }
+
+    .log-line {
+        margin-bottom: 0.25rem;
+        line-height: 1.4;
+    }
+
+    .log-line.filtered-match {
+        background-color: rgba(255, 255, 0, 0.2);
+    }
+
+    .log-controls {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 4px;
+        margin-bottom: 1rem;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+
+    .alert-info {
+        background-color: #d1ecf1;
+        border: 1px solid #bee5eb;
+        border-radius: 4px;
+        padding: 1rem;
+        color: #0c5460;
+    }
+
+    .text-muted {
+        color: #6c757d;
+        text-align: center;
+        padding: 2rem;
+    }
+</style>
+{% endblock %}

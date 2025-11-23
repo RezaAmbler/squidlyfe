@@ -1,0 +1,70 @@
+version: "3.8"
+
+services:
+  squid-whitelist-proxy:
+    build: .
+    container_name: squid-whitelist-proxy
+
+    # Port mappings
+    ports:
+      - "3128:3128"  # Squid HTTP proxy
+      - "8080:8080"  # Web UI
+
+    # Environment variables
+    environment:
+      # Admin credentials - CHANGE THESE!
+      - ADMIN_USERNAME=admin
+      - ADMIN_PASSWORD=changeme
+
+      # Optional: Custom secret key for Flask sessions
+      # - SECRET_KEY=your-secret-key-here
+
+      # Paths (use defaults unless you need to customize)
+      # - DATA_DIR=/data
+      # - WHITELIST_PATH=/etc/squid/whitelist.txt
+      # - CONFIG_PATH=/data/config.yaml
+
+    # Volume mounts
+    volumes:
+      # Persistent data directory for whitelist and configuration
+      - ./data:/data
+
+      # Squid cache directory (must be persistent for proper operation)
+      - ./data/squid-cache:/var/spool/squid
+
+      # Optional: Mount custom Squid config template
+      # - ./squid/squid.conf.template:/etc/squid/squid.conf.template:ro
+
+      # Optional: Mount logs to host for external processing
+      # - ./logs:/var/log/squid
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (optional, adjust based on your needs)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M
+
+    # Logging configuration (optional)
+    # logging:
+    #   driver: "json-file"
+    #   options:
+    #     max-size: "10m"
+    #     max-file: "3"
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Network mode (optional, use host mode if needed)
+    # network_mode: bridge
