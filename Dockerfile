@@ -20,7 +20,8 @@ RUN apt-get update && \
         ca-certificates \
         procps \
         curl \
-        gosu && \
+        gosu \
+        sudo && \
     rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
@@ -72,6 +73,13 @@ RUN chown -R appuser:appuser /app
 # Note: /data volume permissions will be handled at runtime in entrypoint.sh
 RUN mkdir -p /data && \
     chown -R appuser:appuser /data
+
+# Configure sudo to allow appuser to control Squid without password
+# This is required because appuser needs to send signals to Squid (running as proxy user)
+# Limited to specific squid control commands for security
+RUN echo "appuser ALL=(ALL) NOPASSWD: /usr/sbin/squid -k reconfigure" >> /etc/sudoers.d/appuser-squid && \
+    echo "appuser ALL=(ALL) NOPASSWD: /usr/sbin/squid -k parse" >> /etc/sudoers.d/appuser-squid && \
+    chmod 0440 /etc/sudoers.d/appuser-squid
 
 # ==============================================================================
 # Expose ports

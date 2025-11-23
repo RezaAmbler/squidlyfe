@@ -338,9 +338,11 @@ def reload_squid() -> Tuple[bool, str]:
         Tuple of (success: bool, message: str)
     """
     try:
-        # Use 'squid -k reconfigure' to reload config
+        # Use sudo to run 'squid -k reconfigure' as root
+        # This is required because the web app runs as appuser but Squid runs as proxy user
+        # Only appuser can send signals to proxy-owned processes via sudo
         result = subprocess.run(
-            ['squid', '-k', 'reconfigure'],
+            ['sudo', 'squid', '-k', 'reconfigure'],
             capture_output=True,
             text=True,
             timeout=10
@@ -547,8 +549,9 @@ def verify_squid_config() -> Tuple[bool, str]:
         Tuple of (valid: bool, message: str)
     """
     try:
+        # Use sudo to run 'squid -k parse' to verify config
         result = subprocess.run(
-            ['squid', '-k', 'parse'],
+            ['sudo', 'squid', '-k', 'parse'],
             capture_output=True,
             text=True,
             timeout=10

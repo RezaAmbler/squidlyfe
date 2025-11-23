@@ -394,6 +394,10 @@ if [ -f /data/whitelist.txt ]; then
     chmod 664 /data/whitelist.txt 2>/dev/null || true
 fi
 
+# Ensure Squid cache directory (which contains PID file) is readable by appuser
+# appuser uses sudo to send signals to Squid, but may need to read PID file
+chmod -R g+r /var/spool/squid 2>/dev/null || true
+
 exec gosu appuser gunicorn \
     --bind 0.0.0.0:8080 \
     --workers 2 \
