@@ -1,90 +1,164 @@
 # Tests
 
-This directory contains tests for the Squid Whitelist Proxy appliance.
+Tests for the Squid Whitelist Proxy appliance.
 
-## Test Files
+Everything here runs in CI on every push to `main` and on every pull request
+(`.github/workflows/ci.yml`).
 
-### `test_empty_whitelist.sh`
-Integration test that verifies the container starts successfully with an empty whitelist.
+## Layout
 
-**What it tests:**
-- Container starts without errors when whitelist is empty
-- Health endpoint responds
-- Proxy denies all traffic (correct "deny all" behavior)
-- No restart loop occurs
+| File | Kind | Needs |
+|---|---|---|
+| `test_whitelist_validation.py` | unit | nothing (stdlib only) |
+| `test_squid_config_render.py` | unit | PyYAML |
+| `test_flask_ui.py` | unit | Flask |
+| `test_log_viewer.py` | unit | Flask |
+| `test_security.py` | unit | Flask |
+| `test_e2e_smoke.sh` | end-to-end | Docker, a built image |
+| `test_empty_whitelist.sh` | integration | Docker |
 
-**Run it:**
+## Unit tests
+
+Each Python test file must be run **as its own process**:
+
 ```bash
-cd /path/to/squidlyfe
+python3 tests/test_whitelist_validation.py
+python3 tests/test_flask_ui.py
+python3 tests/test_log_viewer.py
+python3 tests/test_security.py
+python3 tests/test_squid_config_render.py
+```
+
+Or all of them:
+
+```bash
+for f in tests/test_*.py; do echo "== $f"; python3 "$f" || break; done
+```
+
+Do **not** collect them into a single `pytest` invocation. They mutate
+`os.environ`, monkeypatch module-level paths such as
+`squid_control.WHITELIST_PATH`, and call `importlib.reload(app)`. Sharing one
+interpreter makes that state collide and produces false passes and failures.
+
+The Flask-dependent files need the pinned dependencies:
+
+```bash
+uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
+for f in tests/test_*.py; do echo "== $f"; .venv/bin/python "$f" || break; done
+```
+
+### What they cover
+
+- **`test_whitelist_validation.py`** — normalization (`example.com` vs
+  `*.example.com` vs `.example.com`), exact/wildcard separation, coverage
+  detection, `filter_conflicts()`, empty-whitelist handling.
+- **`test_squid_config_render.py`** — `regenerate_squid_config()` substitutes
+  every `{{...}}` placeholder, emits `dns_nameservers` and the
+  `acl allowed_sites dstdomain` line, and honours each logging mode.
+- **`test_flask_ui.py`** — session handling, whitelist add/remove routes,
+  secret-key stability across workers.
+- **`test_log_viewer.py`** — `tail_log()` cursor logic (initial tail,
+  incremental reads, rotation) and the `/api/logs` endpoint.
+- **`test_security.py`** — CSRF, login rate limiting, security headers,
+  credential handling.
+
+## `test_e2e_smoke.sh` — end-to-end smoke test
+
+The reusable core of the release checklist. It starts a container from an
+already-built image, drives the real web UI and the real proxy, prints one
+`PASS` / `FAIL` / `SKIP` line per check, and exits non-zero if anything failed.
+
+```bash
+docker build -t squidlyfe:ci .
+IMAGE=squidlyfe:ci ./tests/test_e2e_smoke.sh
+```
+
+### What it checks
+
+1. `/health` comes up (01)
+2. `squid -k parse` is clean (02) and `squid.conf` has no unresolved `{{...}}`
+   placeholders from the boot render (03)
+3. deny-by-default through the proxy (04)
+4. login: CSRF extraction from the rendered form, cookie jar, redirect (05-08)
+5. whitelist add (exact), persistence to `/data`, duplicate suppression,
+   proxy ALLOW over plain HTTP (09-13)
+6. exact + wildcard conflict: the covered exact entry is dropped so Squid does
+   not FATAL, `squid -k parse` still clean, no `FATAL` in `cache.log`, proxy
+   ALLOW for a subdomain and for CONNECT (14-20)
+7. whitelist remove, and deny-by-default again afterwards (21-23)
+8. DNS settings saved from the UI reach both `squid.conf` and
+   `/data/config.yaml`, and the re-render leaves no placeholders (24-27)
+9. `/api/logs`: happy path, path-traversal and absolute-path rejection,
+   authentication required (28-31)
+10. login rate limiting returns `429`, by the 6th failed attempt — later than
+    that means the limiter is per-worker rather than shared (32)
+11. the container is still running and the boot banner is present (33-34)
+
+It finishes by printing the Squid, Python and dependency versions from inside
+the image.
+
+### Configuration
+
+Everything is an environment variable; nothing is hardcoded.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `IMAGE` | `squidlyfe:ci` | image tag to test |
+| `NAME` | `squidlyfe-e2e` | container name |
+| `UI_PORT` / `PROXY_PORT` | `18080` / `13128` | host ports (non-default so a running `make up` is never disturbed) |
+| `BIND_ADDR` | `127.0.0.1` | address the ports are published on |
+| `ADMIN_USER` / `ADMIN_PASS` | `admin` / `e2epass` | web UI credentials |
+| `ALLOW_DOMAIN` | `example.com` | domain used for the ALLOW checks |
+| `DNS_TEST_SERVERS` | `9.9.9.9 1.1.1.1` | nameservers saved through the UI |
+| `E2E_DATA_DIR` | `mktemp -d` | throwaway `/data` directory |
+| `CURL_TIMEOUT` / `BOOT_TIMEOUT` | `20` / `90` | seconds |
+| `RATE_LIMIT_EXPECT_BY` | `6` | attempt by which a `429` must appear |
+| `E2E_SKIP_NETWORK=1` | off | skip checks that need real outbound internet |
+| `E2E_REQUIRE_NETWORK=1` | off | turn those skips into failures |
+| `E2E_FAIL_FAST=1` | off | stop at the first failure |
+| `KEEP_CONTAINER=1` | off | leave the container up for debugging |
+
+### Safety and portability
+
+- It **never** mounts the repository's `./data` directory — that holds real
+  whitelist, config and secret-key state. A `mktemp -d` directory is used and
+  removed on exit, and the script refuses outright to use a path ending in
+  `squidlyfe/data`.
+- Cleanup (`docker rm -f`, temp dirs) runs from a `trap`, including on Ctrl-C.
+- No `timeout(1)` dependency: macOS does not ship one. `curl --max-time` bounds
+  every HTTP call, and `timeout`/`gtimeout` is used for `docker exec` only when
+  present.
+- bash 3.2 compatible (macOS `/bin/bash`), no GNU-only `sed`/`date` flags.
+- Checks that need real outbound internet degrade to `SKIP` when the host
+  cannot reach `ALLOW_DOMAIN`.
+
+## `test_empty_whitelist.sh`
+
+Integration test for the empty-whitelist regression: the container must start
+and stay up with no whitelist entries, serve `/health`, and deny all proxied
+traffic with `403`.
+
+```bash
 ./tests/test_empty_whitelist.sh
 ```
 
-**Expected outcome:**
-- Container starts and stays running
-- Health check passes: `curl http://localhost:8080/health` returns 200
-- Proxy requests are denied: `curl -x http://localhost:3128 http://example.com` returns 403
+## CI
 
-### `test_whitelist_validation.py`
-Unit tests for whitelist read/write operations.
+`.github/workflows/ci.yml` runs three jobs:
 
-**What it tests:**
-- Reading empty whitelist returns empty list (not an error)
-- Reading whitelist with only comments returns empty list
-- Writing empty whitelist creates valid file
-- Round-trip write-then-read preserves entries
-- Empty entries are filtered out
+- **`unit`** — Python 3.11 and 3.13 (bookworm's and trixie's interpreters).
+  Byte-compiles `app/*.py`, `bash -n`s every shell script, then runs each
+  `tests/test_*.py` as its own process.
+- **`audit`** — `pipx run pip-audit --strict -r requirements.txt`. Blocking, on
+  purpose: a new advisory against a pinned dependency should fail the build.
+- **`docker`** — builds the image and runs `tests/test_e2e_smoke.sh` against it.
 
-**Run it:**
-```bash
-cd /path/to/squidlyfe
-python3 tests/test_whitelist_validation.py
-```
+## Adding tests
 
-**Expected outcome:**
-```
-test_empty_entries_filtered (__main__.TestWhitelistValidation) ... ok
-test_read_empty_whitelist (__main__.TestEmptyWhitelistHandling) ... ok
-test_read_whitelist_mixed_content (__main__.TestEmptyWhitelistHandling) ... ok
-test_read_whitelist_only_comments (__main__.TestEmptyWhitelistHandling) ... ok
-test_write_empty_whitelist (__main__.TestEmptyWhitelistHandling) ... ok
-test_write_then_read_whitelist (__main__.TestEmptyWhitelistHandling) ... ok
-
-----------------------------------------------------------------------
-Ran 6 tests in X.XXXs
-
-OK
-```
-
-## Running All Tests
-
-```bash
-# Unit tests
-python3 tests/test_whitelist_validation.py
-
-# Integration test (requires Docker)
-./tests/test_empty_whitelist.sh
-```
-
-## Adding New Tests
-
-When adding features, please add corresponding tests:
-
-1. **Unit tests** (Python): Add to `test_whitelist_validation.py` or create new test files
-2. **Integration tests** (Bash): Create new `.sh` scripts in this directory
-
-## Test Coverage
-
-Current test coverage focuses on the empty whitelist regression:
-
-- ✅ Empty whitelist file handling
-- ✅ Whitelist with only comments
-- ✅ Container startup with empty whitelist
-- ✅ Health check with empty whitelist
-- ✅ Proxy deny-all behavior
-
-Future test areas:
-- [ ] Web UI login and authentication
-- [ ] Whitelist add/remove via UI
-- [ ] Logging configuration changes
-- [ ] Squid reload on configuration change
-- [ ] Multi-user scenarios (future feature)
+- Python: a new `tests/test_*.py` is picked up by the loop and by CI
+  automatically. Follow the existing style — plain `unittest`, a `run_tests()`
+  helper and an `if __name__ == '__main__':` block that exits non-zero on
+  failure.
+- Shell: a new `tests/*.sh` is syntax-checked by CI automatically. Add
+  end-to-end assertions to `test_e2e_smoke.sh` rather than creating another
+  container-starting script.
