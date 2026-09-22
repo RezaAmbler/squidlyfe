@@ -37,6 +37,8 @@ docker-compose.override.yml
 data/whitelist.txt
 data/config.yaml
 data/.secret_key
+data/.login_attempts.json
+data/.login_attempts.json.lock
 data/squid-cache/
 
 # LLM / scratch / local notes

@@ -362,11 +362,13 @@ echo "Squid Proxy:  port 3128"
 echo "Web UI:       port 8080"
 echo ""
 echo "Admin Username: ${ADMIN_USERNAME:-admin}"
-if [ "${ADMIN_PASSWORD:-changeme}" = "changeme" ]; then
+if [ -n "${ADMIN_PASSWORD_HASH:-}" ]; then
+    echo "Admin Password: <hash configured>"
+elif [ "${ADMIN_PASSWORD:-changeme}" = "changeme" ]; then
     echo "Admin Password: changeme (DEFAULT - CHANGE THIS!)"
     echo ""
     echo "⚠️  WARNING: Using default password 'changeme'!"
-    echo "⚠️  Set ADMIN_PASSWORD environment variable to secure the UI"
+    echo "⚠️  Set ADMIN_PASSWORD or ADMIN_PASSWORD_HASH to secure the UI"
 else
     echo "Admin Password: <set via environment>"
 fi

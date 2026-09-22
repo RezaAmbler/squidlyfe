@@ -13,6 +13,10 @@ services:
       # Admin credentials - CHANGE THESE!
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=changeme
+      # Preferred over ADMIN_PASSWORD: store only a hash (generate with `make password-hash`).
+      # Compose interpolates $, so every $ in the hash MUST be doubled to $$ or the
+      # value arrives truncated and every login silently fails.
+      # - ADMIN_PASSWORD_HASH=scrypt:32768:8:1$$yoursalt$$yourhash
       - DISABLE_SECURE_COOKIES=true   # allow session cookies over HTTP
       # Optional: Custom secret key for Flask sessions
       # - SECRET_KEY=your-secret-key-here
