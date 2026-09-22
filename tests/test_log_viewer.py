@@ -5,6 +5,7 @@ Tests the tail_log helper and /api/logs endpoint
 """
 
 import unittest
+import re
 import tempfile
 import os
 import sys
@@ -231,11 +232,20 @@ class TestAPILogsEndpoint(unittest.TestCase):
             if key in os.environ:
                 del os.environ[key]
 
+    def get_csrf_token(self, response_data):
+        """Extract CSRF token from an HTML response"""
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"',
+                          response_data.decode('utf-8'))
+        return match.group(1) if match else None
+
     def login(self):
-        """Helper to log in"""
+        """Helper to log in (CSRF token required since b3acf51)"""
+        response = self.client.get('/login')
+        token = self.get_csrf_token(response.data)
         self.client.post('/login', data={
             'username': 'admin',
-            'password': 'test123'
+            'password': 'test123',
+            'csrf_token': token
         })
 
     def test_api_logs_requires_authentication(self):
