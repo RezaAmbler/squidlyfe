@@ -47,6 +47,23 @@ environment:
   - ADMIN_PASSWORD=YourSecurePassword123
 ```
 
+Better still, keep no plaintext password in the file at all — generate a hash
+and set `ADMIN_PASSWORD_HASH` instead (it takes precedence over
+`ADMIN_PASSWORD`):
+
+```bash
+make password-hash        # prompts, prints e.g. scrypt:32768:8:1$Kb1p...$9f2c...
+```
+
+```yaml
+environment:
+  # Every '$' MUST be doubled to '$$' here: Compose interpolates the value and
+  # a single '$' silently truncates the hash, after which every login fails.
+  - ADMIN_PASSWORD_HASH=scrypt:32768:8:1$$Kb1p...$$9f2c...
+```
+
+Sessions last 8 hours by default; override with `SESSION_LIFETIME_MINUTES`.
+
 Then restart: `docker compose down && docker compose up -d`
 
 ## 4. Add Whitelist Entry
@@ -119,7 +136,22 @@ docker compose logs -f
 docker exec squid-whitelist-proxy tail -f /var/log/squid/access.log
 ```
 
-## 8. Stop the Container
+## 8. DNS Resolvers (Optional)
+
+Squid resolves names itself and ignores the container's `/etc/resolv.conf`. The
+nameservers it uses are set on the **Logging** tab (up to four, space- or
+comma-separated) and default to `1.1.1.1 8.8.8.8`.
+
+```bash
+# What Squid is actually using
+docker exec squid-whitelist-proxy grep dns_nameservers /etc/squid/squid.conf
+```
+
+Squid caches negative DNS answers, and `squid -k reconfigure` does not flush
+them. If a domain was looked up while the resolvers were wrong, restart the
+container after fixing them.
+
+## 9. Stop the Container
 
 ```bash
 docker compose down
@@ -148,6 +180,9 @@ docker exec squid-whitelist-proxy squid -k parse
 
 # Reload Squid (zero-downtime)
 docker exec squid-whitelist-proxy squid -k reconfigure
+
+# Back up whitelist + config into backups/
+make backup
 ```
 
 ## Example Whitelists
@@ -244,4 +279,5 @@ docker compose logs
 - **Full documentation:** See [README.md](README.md)
 - **Architecture details:** See [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Development guide:** See [CONTRIBUTING.md](docs/CONTRIBUTING.md)
-- **Testing:** Run tests with `python -m unittest tests/test_whitelist_validation.py tests/test_log_viewer.py`
+- **Testing:** `make test-unit` (112 unit tests) and `make test-e2e` (Docker
+  end-to-end smoke test). See [tests/README.md](tests/README.md).

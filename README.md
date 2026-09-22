@@ -12,6 +12,7 @@ Squid Whitelist Proxy Manager provides deny-by-default HTTP proxy control with:
 - **Zero-downtime reloads** - Squid auto-reloads on configuration changes without restart
 - **Live Log Viewer** - Real-time log tailing with cursor-based polling (local_file mode)
 - **Flexible logging** - Local file, stdout, or remote syslog modes
+- **Configurable DNS resolvers** - Set Squid's upstream nameservers from the web UI
 - **Persistent configuration** - Whitelist and config stored in mounted volume
 
 Perfect for IT networks requiring strict outbound web access control, development environments needing package repository filtering, or secure server environments with limited external connectivity.
@@ -90,6 +91,22 @@ Both Squid proxy (port 3128) and Flask web UI (port 8080) run in one container:
 2. **Flask Web UI** - Whitelist management, logging configuration, live log viewer, authentication
 3. **Persistent Storage** - `/data` volume holds whitelist.txt, config.yaml, the session secret and login rate-limit state
 
+### Runtime Stack
+
+| Component | Version |
+|-----------|---------|
+| Base image | `debian:trixie-slim` |
+| Squid | 6.13 (Debian package) |
+| Python | 3.13, in an in-image virtualenv at `/opt/venv` |
+| Flask / Werkzeug | 3.1.3 / 3.1.8 |
+| Gunicorn | 26.2.0 |
+| PyYAML | 6.0.3 |
+
+Python dependencies are installed into `/opt/venv` (first on `PATH`) rather than
+into Debian's externally-managed system interpreter. `docker build` renders the
+Squid template and runs `squid -k parse` as a build step, so a directive this
+Squid version rejects fails the build instead of the container.
+
 ### Key Features
 
 - **Exact vs Wildcard entries** - `example.com` (exact) matches ONLY the domain; `.example.com` (wildcard) matches apex AND subdomains
@@ -115,9 +132,11 @@ docker compose down
 # Restart
 docker compose restart
 
-# Run tests
-python -m unittest tests/test_whitelist_validation.py tests/test_log_viewer.py
-./tests/test_empty_whitelist.sh
+# Run the unit suite (112 tests over 5 files, each file as its own process)
+make test-unit
+
+# Build the image and run the end-to-end smoke test (34 checks)
+make test-e2e
 
 # Squid operations
 docker exec squid-whitelist-proxy squid -k reconfigure  # Reload config
@@ -141,7 +160,8 @@ Configure the container via environment variables in `docker-compose.yml`:
 | `ADMIN_PASSWORD` | `changeme` | Web UI admin password, plaintext (⚠️ **CHANGE THIS!**) |
 | `ADMIN_PASSWORD_HASH` | (unset) | **Preferred.** Werkzeug password hash. Takes precedence over `ADMIN_PASSWORD` when set |
 | `SESSION_LIFETIME_MINUTES` | `480` | Session expiry in minutes (8 hours, sliding window) |
-| `SECRET_KEY` | (auto-generated) | Flask session secret key |
+| `SECRET_KEY` | (auto-generated) | Flask session secret key (persisted to `/data/.secret_key` if unset) |
+| `DISABLE_SECURE_COOKIES` | (unset) | Set to `true` to allow session cookies over plain HTTP (development only) |
 | `DATA_DIR` | `/data` | Persistent data directory |
 | `WHITELIST_PATH` | `/etc/squid/whitelist.txt` | Whitelist file path |
 | `CONFIG_PATH` | `/data/config.yaml` | Config file path |
@@ -268,7 +288,11 @@ echo ".npmjs.org" >> ./data/whitelist.txt
 docker exec squid-whitelist-proxy squid -k reconfigure
 ```
 
-**Note:** Manual edits bypass duplicate checking and coverage warnings. For best experience, use the Web UI.
+**Note:** Manual edits bypass duplicate checking and coverage warnings. In
+particular, listing both `github.com` and `.github.com` by hand makes Squid
+refuse the config outright (`FATAL: Bungled ... '.github.com' is a subdomain of
+'github.com'`) and the reload will fail. The Web UI removes that conflict for
+you — prefer it.
 
 ### Example Whitelist
 
@@ -306,9 +330,14 @@ Add: api.example.com (exact) → Skipped (already covered by wildcard)
 **Adding wildcard when exact exists:**
 ```
 Existing: example.com, api.example.com (exact)
-Add: .example.com (wildcard) → Added with warning (covers 2 existing exact entries)
-Result: Both exact and wildcard entries remain (redundant but allowed)
+Add: .example.com (wildcard) → Added; the 2 covered exact entries are removed
+Result: .example.com only — "Removed 2 conflicting exact entry/entries to prevent Squid errors"
 ```
+
+The removal is not cosmetic: Squid refuses to start or reconfigure when an
+exact entry and a wildcard for the same domain are both present, so
+`filter_conflicts()` drops the now-redundant exact entries before the file is
+written.
 
 ---
 
@@ -330,6 +359,18 @@ Configure via the **Logging** tab in the web UI:
 3. **Remote Syslog**
    - Logs to stdout with syslog target metadata
    - Configure external log shipper (rsyslog, Fluent Bit, etc.) to forward
+
+### DNS Resolvers
+
+Squid does its own DNS resolution and ignores the container's `/etc/resolv.conf`.
+The upstream nameservers are set on the **Logging** tab (up to four, space- or
+comma-separated) and default to `1.1.1.1 8.8.8.8`. They are stored in
+`/data/config.yaml` under `dns.nameservers` and rendered into `squid.conf` as
+`dns_nameservers`.
+
+Note that Squid caches negative DNS answers. If a domain was looked up while
+the resolvers were wrong, `squid -k reconfigure` will **not** clear that cached
+failure — restart the container to flush it.
 
 ### Example: External Log Collection
 
@@ -416,16 +457,21 @@ squidlyfe/
 │   ├── config.yaml            # Application configuration
 │   ├── .secret_key            # Flask session secret (auto-generated)
 │   └── .login_attempts.json   # Login rate-limit state (auto-managed, 0600)
-├── tests/                     # Unit and integration tests
-│   ├── test_whitelist_validation.py
-│   ├── test_flask_ui.py
-│   ├── test_log_viewer.py
+├── tests/                     # Unit, integration and end-to-end tests
+│   ├── README.md              # What each test covers and how to run it
+│   ├── test_whitelist_validation.py   # 36 tests
+│   ├── test_log_viewer.py             # 20 tests
+│   ├── test_security.py               # 41 tests
+│   ├── test_squid_config_render.py    # 11 tests
+│   ├── test_flask_ui.py               #  4 tests
+│   ├── test_e2e_smoke.sh      # End-to-end smoke test (34 checks, needs Docker)
 │   └── test_empty_whitelist.sh
 ├── docs/                      # Documentation
 │   ├── ARCHITECTURE.md        # Technical architecture documentation
 │   ├── CONTRIBUTING.md        # Developer guide
 │   ├── IMPLEMENTATION_SUMMARY.md
 │   └── PROJECT_OVERVIEW.md
+├── .github/workflows/ci.yml   # CI: unit tests, pip-audit, Docker end-to-end
 ├── scripts/                   # Helper scripts
 ├── Makefile                   # Common operations
 ├── Dockerfile
@@ -467,6 +513,9 @@ chmod -R 755 ./data
 2. Test DNS resolution: `docker exec squid-whitelist-proxy nslookup example.com`
 3. Check Squid logs for denied requests
 4. Verify Squid reloaded: Look for "Reconfiguring" in logs
+5. Check the rendered resolvers: `docker exec squid-whitelist-proxy grep dns_nameservers /etc/squid/squid.conf`.
+   Squid caches negative DNS answers and `squid -k reconfigure` does not flush
+   them, so after fixing the resolvers you may need `docker compose restart`.
 
 ### Web UI shows errors
 
@@ -507,6 +556,12 @@ chmod -R 755 ./data
   Attempts are recorded in `$DATA_DIR/.login_attempts.json` (mode `0600`,
   guarded by an advisory `flock`), so the limit is shared by **all gunicorn
   workers** and **survives a container restart** rather than resetting
+- All state-changing POST routes require a CSRF token, validated with
+  `hmac.compare_digest`; every response carries hardening headers
+  (`X-Frame-Options`, `X-Content-Type-Options`, CSP, `Referrer-Policy`)
+- Session cookies are `HttpOnly`, `SameSite=Lax` and `Secure` unless
+  `DISABLE_SECURE_COOKIES=true` is set (development only — the shipped
+  `docker-compose.yml` sets it so the UI works over plain HTTP)
 - Consider adding HTTPS/TLS termination via reverse proxy
 
 ### Network Isolation
@@ -545,9 +600,12 @@ docker compose up -d
 # View logs
 docker compose logs -f
 
-# Run all tests
-python -m unittest tests/test_whitelist_validation.py tests/test_flask_ui.py tests/test_log_viewer.py
-./tests/test_empty_whitelist.sh
+# Run the unit suite (112 tests; use PY= to point at a virtualenv)
+make test-unit
+make test-unit PY=.venv/bin/python
+
+# Build the image and run the end-to-end smoke test
+make test-e2e
 
 # Open shell in container
 docker exec -it squid-whitelist-proxy /bin/bash
@@ -556,7 +614,19 @@ docker exec -it squid-whitelist-proxy /bin/bash
 docker exec squid-whitelist-proxy squid -k parse
 ```
 
-See [Makefile](Makefile) for additional commands and [CONTRIBUTING.md](docs/CONTRIBUTING.md) for detailed development instructions.
+See [Makefile](Makefile) for additional commands, [tests/README.md](tests/README.md)
+for the test suite, and [CONTRIBUTING.md](docs/CONTRIBUTING.md) for detailed
+development instructions.
+
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
+
+- **`unit`** — Python 3.11 and 3.13, byte-compiles `app/*.py`, `bash -n`s every
+  shell script, then runs each `tests/test_*.py` as its own process
+- **`audit`** — `pipx run pip-audit --strict -r requirements.txt`, blocking, so
+  a new advisory against a pinned dependency fails the build
+- **`docker`** — builds the image and runs `tests/test_e2e_smoke.sh` against it
 
 ---
 
@@ -586,7 +656,6 @@ Future enhancements under consideration:
 - [ ] Multi-user support with different permission levels
 - [ ] API for programmatic whitelist management
 - [ ] Integration with Active Directory/LDAP
-- [ ] Real-time log viewer in web UI
 - [ ] Traffic statistics and reporting dashboard
 
 ---

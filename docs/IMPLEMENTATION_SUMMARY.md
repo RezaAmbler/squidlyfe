@@ -25,13 +25,27 @@ squidlyfe/
 ├── squid/
 │   └── squid.conf.template        # Squid configuration template
 ├── data/                          # Persistent storage (created at runtime)
-│   ├── whitelist.txt              # Domain whitelist
-│   └── config.yaml                # Application config
-├── Dockerfile                     # Container image definition
+│   ├── whitelist.txt              # Domain whitelist (/etc/squid/whitelist.txt symlinks here)
+│   ├── config.yaml                # Logging + DNS config
+│   ├── .secret_key                # Flask session secret (0600)
+│   └── .login_attempts.json       # Shared login rate-limit state (0600)
+├── tests/                         # Unit, integration and end-to-end tests
+│   ├── README.md                  # Test suite guide
+│   ├── test_whitelist_validation.py   # 36 tests
+│   ├── test_security.py               # 41 tests
+│   ├── test_log_viewer.py             # 20 tests
+│   ├── test_squid_config_render.py    # 11 tests
+│   ├── test_flask_ui.py               #  4 tests
+│   ├── test_e2e_smoke.sh          # End-to-end smoke test (34 checks)
+│   └── test_empty_whitelist.sh    # Empty-whitelist integration test
+├── docs/                          # ARCHITECTURE, CONTRIBUTING, this file, PROJECT_OVERVIEW
+├── .github/workflows/ci.yml       # CI: unit tests, pip-audit, Docker end-to-end
+├── Makefile                       # build/up/down, test-unit, test-e2e, password-hash
+├── Dockerfile                     # Container image definition (trixie + /opt/venv)
 ├── docker-compose.yml             # Container orchestration
-├── requirements.txt               # Python dependencies
+├── requirements.txt               # Pinned Python dependencies
 ├── README.md                      # Complete documentation
-├── QUICK_START.md                 # Quick reference guide
+├── QUICKSTART.md                  # Quick reference guide
 ├── .gitignore                     # Git ignore patterns
 └── .dockerignore                  # Docker build ignore patterns
 ```
@@ -48,7 +62,8 @@ squidlyfe/
 - ✅ Automatic Squid reload on configuration changes
 
 ### Web UI Features
-- ✅ User authentication (username/password from env vars)
+- ✅ User authentication (username/password from env vars, or a hashed password
+  via `ADMIN_PASSWORD_HASH`)
 - ✅ Session management with Flask sessions
 - ✅ Whitelist management page:
   - View current whitelist
@@ -58,6 +73,8 @@ squidlyfe/
 - ✅ Logging configuration page:
   - Choose logging mode (local_file, stdout, remote_syslog)
   - Configure syslog target settings
+  - Configure Squid's upstream DNS nameservers (up to four; default `1.1.1.1 8.8.8.8`)
+  - Live log viewer (local_file mode) with cursor-based polling
   - Persist configuration to YAML file
 - ✅ Clean, modern, mobile-responsive UI
 - ✅ Flash messages for user feedback
@@ -69,8 +86,13 @@ squidlyfe/
 - ✅ Safe ports and SSL port restrictions
 - ✅ Header anonymization (privacy protection)
 - ✅ Configurable logging (file/stdout/syslog)
-- ✅ Template-based config generation
-- ✅ Configuration validation on startup
+- ✅ Template-based config generation via a single renderer
+  (`regenerate_squid_config()`), used by the web UI, by `entrypoint.sh` at boot
+  and by the Dockerfile's build-time validation
+- ✅ Configurable DNS resolvers (`dns_nameservers`)
+- ✅ Configuration validated at build time (`squid -k parse` during
+  `docker build`) and again on startup, plus a hard failure if any `{{...}}`
+  placeholder survives the render
 
 ### DevOps & Operations
 - ✅ Docker Compose setup for easy deployment
@@ -86,21 +108,36 @@ squidlyfe/
 ## 🔧 Key Implementation Details
 
 ### Authentication System
-- Simple username/password authentication via Flask sessions
-- Credentials from environment variables (`ADMIN_USERNAME`, `ADMIN_PASSWORD`)
+- Username/password authentication via Flask sessions
+- Credentials from environment variables (`ADMIN_USERNAME`, and either
+  `ADMIN_PASSWORD` or the preferred `ADMIN_PASSWORD_HASH`, which wins when set)
+- Both halves compared with `hmac.compare_digest`; a malformed hash denies
+  access instead of raising
+- `session.clear()` on successful login (session-fixation defence)
+- Session lifetime bounded by `SESSION_LIFETIME_MINUTES` (default 480 = 8h)
 - `@login_required` decorator for protected routes
-- Warning if default password is used
+- CSRF token required on every state-changing POST
+- Login rate limit: 5 attempts per IP per 5 minutes, stored in
+  `$DATA_DIR/.login_attempts.json` under an advisory `flock` so it is shared by
+  all gunicorn workers and survives restarts
+- Warning banner if the default password is still in use
 
 ### Whitelist Management
 ```python
 # Read whitelist (filters comments and empty lines)
 read_whitelist() -> List[str]
 
-# Write whitelist (atomic write with temp file)
+# Write whitelist. Resolves the /etc/squid/whitelist.txt -> /data/whitelist.txt
+# symlink with os.path.realpath(), writes a temp file next to the real target
+# and os.replace()s it into place. Never shutil.move(): that would replace the
+# symlink with a regular file and silently drop every entry on the next restart.
 write_whitelist(entries: List[str]) -> None
 
 # Reload Squid configuration
 reload_squid() -> Tuple[bool, str]
+
+# Render squid.conf from the template (the ONLY renderer)
+regenerate_squid_config(config: dict) -> Tuple[bool, str]
 ```
 
 ### Configuration System
@@ -114,7 +151,10 @@ reload_squid() -> Tuple[bool, str]
 2. Initialize `whitelist.txt` if missing
 3. Initialize `config.yaml` if missing
 4. Create symlink from `/etc/squid/whitelist.txt` to `/data/whitelist.txt`
-5. Generate Squid config from template
+5. Render `squid.conf` by calling `regenerate_squid_config()` — the same Python
+   renderer the web UI uses — then hard-fail if any `{{...}}` placeholder
+   survived (Squid accepts them silently, which is how the proxy once booted
+   with zero DNS nameservers)
 6. Initialize Squid cache and validate config
 7. Start Squid daemon
 8. Start Flask app with Gunicorn
@@ -174,12 +214,19 @@ http_access deny all
 | Whitelist Entry | Matches | Doesn't Match |
 |----------------|---------|---------------|
 | `example.com` | `example.com` | `www.example.com`, `sub.example.com` |
-| `.example.com` | `www.example.com`, `api.example.com`, `any.sub.example.com` | `example.com` |
+| `.example.com` | `example.com`, `www.example.com`, `api.example.com`, `any.sub.example.com` | `other.com` |
 | `api.example.com` | `api.example.com` | `www.example.com` |
+
+A wildcard entry covers the apex domain too. That is why listing both
+`example.com` and `.example.com` is a conflict Squid refuses
+(`FATAL: Bungled ... '.example.com' is a subdomain of 'example.com'`, identical
+on Squid 5.7 and 6.13), and why `filter_conflicts()` drops the redundant exact
+entry before the file is written.
 
 ### Update Flow
 1. Admin adds domain via Web UI
-2. Flask app writes to `/data/whitelist.txt`
+2. Flask app writes through the `/etc/squid/whitelist.txt` symlink to
+   `/data/whitelist.txt`, dropping any exact entry a wildcard now covers
 3. App runs `squid -k reconfigure`
 4. Squid reloads ACLs without restarting
 5. New domain is immediately accessible
@@ -187,6 +234,17 @@ http_access deny all
 ---
 
 ## 🧪 Testing the Implementation
+
+### Automated Tests
+
+```bash
+make test-unit    # 112 unit tests across 5 files, each file its own process
+make test-e2e     # build the image + 34-check end-to-end smoke test
+```
+
+CI (`.github/workflows/ci.yml`) runs the unit suite on Python 3.11 and 3.13, a
+blocking `pip-audit --strict`, and the Docker end-to-end job on every push to
+`main` and every pull request.
 
 ### Test Proxy Functionality
 ```bash
@@ -225,7 +283,12 @@ curl -X POST http://localhost:8080/whitelist \
 environment:
   - ADMIN_USERNAME=admin
   - ADMIN_PASSWORD=changeme  # CHANGE THIS!
+  # Preferred: a werkzeug hash from `make password-hash`. Takes precedence over
+  # ADMIN_PASSWORD. Compose interpolates '$', so DOUBLE every one to '$$'.
+  # - ADMIN_PASSWORD_HASH=scrypt:32768:8:1$$salt$$hash
+  - SESSION_LIFETIME_MINUTES=480   # 8h, sliding
   - SECRET_KEY=your-secret-key
+  - DISABLE_SECURE_COOKIES=true    # development only (allows cookies over HTTP)
 ```
 
 ### Whitelist File (data/whitelist.txt)
@@ -243,6 +306,10 @@ logging:
   syslog_host: ''
   syslog_port: '514'
   syslog_protocol: udp
+dns:
+  nameservers:
+    - 1.1.1.1
+    - 8.8.8.8
 ```
 
 ---
@@ -384,9 +451,10 @@ not into the externally-managed system interpreter.
 
 ## 🚀 Next Steps
 
-The appliance is ready to deploy! Follow the [QUICK_START.md](QUICK_START.md) guide to get started.
+The appliance is ready to deploy! Follow the [QUICKSTART.md](../QUICKSTART.md) guide to get started.
 
-For detailed information, see [README.md](README.md).
+For detailed information, see [README.md](../README.md), and
+[ARCHITECTURE.md](ARCHITECTURE.md) for the technical design.
 
 ---
 

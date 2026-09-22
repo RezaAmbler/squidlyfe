@@ -7,15 +7,17 @@ Everything here runs in CI on every push to `main` and on every pull request
 
 ## Layout
 
-| File | Kind | Needs |
-|---|---|---|
-| `test_whitelist_validation.py` | unit | nothing (stdlib only) |
-| `test_squid_config_render.py` | unit | PyYAML |
-| `test_flask_ui.py` | unit | Flask |
-| `test_log_viewer.py` | unit | Flask |
-| `test_security.py` | unit | Flask |
-| `test_e2e_smoke.sh` | end-to-end | Docker, a built image |
-| `test_empty_whitelist.sh` | integration | Docker |
+| File | Kind | Tests | Needs |
+|---|---|---:|---|
+| `test_whitelist_validation.py` | unit | 36 | nothing (stdlib only) |
+| `test_squid_config_render.py` | unit | 11 | PyYAML |
+| `test_flask_ui.py` | unit | 4 | Flask |
+| `test_log_viewer.py` | unit | 20 | Flask |
+| `test_security.py` | unit | 41 | Flask |
+| `test_e2e_smoke.sh` | end-to-end | 34 checks | Docker, a built image |
+| `test_empty_whitelist.sh` | integration | — | Docker |
+
+**112 unit tests in total**, all passing.
 
 ## Unit tests
 
@@ -32,6 +34,8 @@ python3 tests/test_squid_config_render.py
 Or all of them:
 
 ```bash
+make test-unit
+# equivalently:
 for f in tests/test_*.py; do echo "== $f"; python3 "$f" || break; done
 ```
 
@@ -44,14 +48,17 @@ The Flask-dependent files need the pinned dependencies:
 
 ```bash
 uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt
-for f in tests/test_*.py; do echo "== $f"; .venv/bin/python "$f" || break; done
+make test-unit PY=.venv/bin/python
 ```
 
 ### What they cover
 
 - **`test_whitelist_validation.py`** — normalization (`example.com` vs
   `*.example.com` vs `.example.com`), exact/wildcard separation, coverage
-  detection, `filter_conflicts()`, empty-whitelist handling.
+  detection, `filter_conflicts()`, empty-whitelist handling, and
+  `TestSymlinkedWhitelistPersistence`: `write_whitelist()` must follow the
+  `/etc/squid/whitelist.txt → /data/whitelist.txt` symlink instead of
+  replacing it with a regular file.
 - **`test_squid_config_render.py`** — `regenerate_squid_config()` substitutes
   every `{{...}}` placeholder, emits `dns_nameservers` and the
   `acl allowed_sites dstdomain` line, and honours each logging mode.
@@ -69,6 +76,8 @@ already-built image, drives the real web UI and the real proxy, prints one
 `PASS` / `FAIL` / `SKIP` line per check, and exits non-zero if anything failed.
 
 ```bash
+make test-e2e
+# equivalently:
 docker build -t squidlyfe:ci .
 IMAGE=squidlyfe:ci ./tests/test_e2e_smoke.sh
 ```
