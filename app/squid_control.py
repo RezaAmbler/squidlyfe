@@ -275,12 +275,20 @@ def write_whitelist(entries: List[str]) -> None:
         # Filter out exact entries covered by wildcards to avoid Squid conflicts
         exact_entries, wildcard_entries = filter_conflicts(exact_entries, wildcard_entries)
 
-        # Ensure parent directory exists
-        os.makedirs(os.path.dirname(WHITELIST_PATH), exist_ok=True)
+        # Resolve symlinks before writing. In the container, WHITELIST_PATH
+        # (/etc/squid/whitelist.txt) is a symlink to $DATA_DIR/whitelist.txt.
+        # Replacing the path directly would clobber the symlink with a regular
+        # file, so the entry would never reach the /data volume and the boot
+        # script would revert it on the next restart.
+        target_path = os.path.realpath(WHITELIST_PATH)
 
-        # Write to temporary file first
+        # Ensure parent directory exists
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+        # Write to a temp file alongside the RESOLVED target, so the atomic
+        # replace stays on one filesystem
         temp_fd, temp_path = tempfile.mkstemp(
-            dir=os.path.dirname(WHITELIST_PATH),
+            dir=os.path.dirname(target_path),
             prefix='.whitelist_tmp_',
             text=True
         )
@@ -310,11 +318,11 @@ def write_whitelist(entries: List[str]) -> None:
                 for entry in wildcard_entries:
                     f.write(f"{entry}\n")
 
-            # Atomic move (replaces old file)
-            shutil.move(temp_path, WHITELIST_PATH)
+            # Atomic replace of the resolved target (keeps the symlink intact)
+            os.replace(temp_path, target_path)
 
             # Set appropriate permissions (readable by squid)
-            os.chmod(WHITELIST_PATH, 0o644)
+            os.chmod(target_path, 0o644)
 
             total_entries = len(exact_entries) + len(wildcard_entries)
             logger.info(f"Successfully wrote {total_entries} entries to whitelist ({len(exact_entries)} exact, {len(wildcard_entries)} wildcard)")

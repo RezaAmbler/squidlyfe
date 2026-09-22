@@ -12,6 +12,7 @@ import sys
 # Add parent directory to path to import modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'app'))
 
+import squid_control
 from squid_control import (
     read_whitelist,
     write_whitelist,
@@ -443,6 +444,97 @@ class TestConflictFiltering(unittest.TestCase):
             shutil.rmtree(test_dir)
 
 
+class TestSymlinkedWhitelistPersistence(unittest.TestCase):
+    """
+    Regression tests: the container symlinks /etc/squid/whitelist.txt to
+    $DATA_DIR/whitelist.txt so the allow-list lands on the persistent volume.
+    write_whitelist() must write THROUGH that symlink. It previously used
+    shutil.move(), which replaced the symlink with a regular file: entries
+    never reached /data, and the boot script reverted them on every restart.
+    """
+
+    def setUp(self):
+        """Create a data dir and an etc dir with a symlink between them"""
+        self.test_dir = tempfile.mkdtemp()
+        self.data_dir = os.path.join(self.test_dir, 'data')
+        self.etc_dir = os.path.join(self.test_dir, 'etc')
+        os.makedirs(self.data_dir)
+        os.makedirs(self.etc_dir)
+
+        self.real_path = os.path.join(self.data_dir, 'whitelist.txt')
+        self.link_path = os.path.join(self.etc_dir, 'whitelist.txt')
+        with open(self.real_path, 'w') as f:
+            f.write('')
+        os.symlink(self.real_path, self.link_path)
+
+    def tearDown(self):
+        """Clean up temporary directory"""
+        import shutil
+        shutil.rmtree(self.test_dir)
+
+    def test_write_preserves_symlink(self):
+        """Writing through the symlink must not turn it into a regular file"""
+        old_path = squid_control.WHITELIST_PATH
+        squid_control.WHITELIST_PATH = self.link_path
+        try:
+            squid_control.write_whitelist(['example.com'])
+            self.assertTrue(
+                os.path.islink(self.link_path),
+                "write_whitelist() clobbered the symlink with a regular file"
+            )
+        finally:
+            squid_control.WHITELIST_PATH = old_path
+
+    def test_write_reaches_persistent_volume(self):
+        """Entries written via the symlink must land in the real data file"""
+        old_path = squid_control.WHITELIST_PATH
+        squid_control.WHITELIST_PATH = self.link_path
+        try:
+            squid_control.write_whitelist(['example.com', '*.github.com'])
+            with open(self.real_path) as f:
+                persisted = [
+                    line.strip() for line in f
+                    if line.strip() and not line.startswith('#')
+                ]
+            self.assertIn('example.com', persisted)
+            self.assertIn('.github.com', persisted)
+        finally:
+            squid_control.WHITELIST_PATH = old_path
+
+    def test_write_survives_relink(self):
+        """
+        Simulate a container restart: entrypoint.sh re-creates the symlink,
+        then the entries must still be readable.
+        """
+        old_path = squid_control.WHITELIST_PATH
+        squid_control.WHITELIST_PATH = self.link_path
+        try:
+            squid_control.write_whitelist(['persistent.example.com'])
+
+            # entrypoint.sh: rm the link, then ln -sf again
+            os.remove(self.link_path)
+            os.symlink(self.real_path, self.link_path)
+
+            entries = squid_control.read_whitelist()
+            self.assertIn('persistent.example.com', entries)
+        finally:
+            squid_control.WHITELIST_PATH = old_path
+
+    def test_no_temp_files_left_behind(self):
+        """The atomic replace must not leave .whitelist_tmp_* files around"""
+        old_path = squid_control.WHITELIST_PATH
+        squid_control.WHITELIST_PATH = self.link_path
+        try:
+            squid_control.write_whitelist(['example.com'])
+            leftovers = [
+                name for name in os.listdir(self.data_dir)
+                if name.startswith('.whitelist_tmp_')
+            ]
+            self.assertEqual(leftovers, [], f"temp files left behind: {leftovers}")
+        finally:
+            squid_control.WHITELIST_PATH = old_path
+
+
 def run_tests():
     """Run all tests"""
     loader = unittest.TestLoader()
@@ -453,6 +545,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestExactVsWildcardSemantics))
     suite.addTests(loader.loadTestsFromTestCase(TestEntryCoverage))
     suite.addTests(loader.loadTestsFromTestCase(TestConflictFiltering))
+    suite.addTests(loader.loadTestsFromTestCase(TestSymlinkedWhitelistPersistence))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
