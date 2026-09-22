@@ -1,7 +1,7 @@
 # Squid Whitelist Proxy - Makefile
 # Common operations for managing the appliance
 
-.PHONY: help build up down restart logs shell squid-logs squid-reload validate clean backup
+.PHONY: help build up down restart logs shell squid-logs squid-reload validate clean backup password-hash
 
 # Default target
 help:
@@ -20,6 +20,7 @@ help:
 	@echo "  make backup        - Backup whitelist and config"
 	@echo "  make health        - Check container health"
 	@echo "  make test          - Test proxy functionality"
+	@echo "  make password-hash - Generate an ADMIN_PASSWORD_HASH value"
 	@echo ""
 
 # Build the Docker image
@@ -100,6 +101,13 @@ test:
 	@echo ""
 	@echo "Note: Add example.com to whitelist via Web UI first"
 	@echo "Web UI: http://localhost:8080"
+
+# Generate a password hash for ADMIN_PASSWORD_HASH (no local Python needed).
+# Remember: when pasting the result into docker-compose.yml, every '$' must be
+# doubled to '$$' or Compose will mangle the hash via variable interpolation.
+password-hash:
+	@docker-compose run --rm --no-deps --entrypoint python3 squid-whitelist-proxy \
+		-c "from werkzeug.security import generate_password_hash; import getpass; print(generate_password_hash(getpass.getpass('Password: ')))"
 
 # View current whitelist
 show-whitelist:

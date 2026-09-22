@@ -341,9 +341,9 @@ class TestRateLimiting(unittest.TestCase):
         os.environ['ADMIN_PASSWORD'] = 'secure123'
 
         from app import app
-        # Clear rate limit tracking between tests
+        # Clear rate limit tracking between tests (file-backed store + fallback)
         import app as app_module
-        app_module.login_attempts.clear()
+        app_module.clear_login_attempts()
 
         self.app = app
         self.app.config['TESTING'] = True
@@ -573,6 +573,318 @@ class TestAuthenticationSecurity(unittest.TestCase):
             del os.environ['ADMIN_PASSWORD']
 
 
+class TestCredentialHardening(unittest.TestCase):
+    """
+    Test the hardened login path:
+    - ADMIN_PASSWORD_HASH support (werkzeug scrypt/pbkdf2)
+    - bounded session lifetime
+    - session fixation defence
+    - rate limiting that survives a worker restart
+    """
+
+    MANAGED_ENV = [
+        'DATA_DIR', 'SECRET_KEY', 'ADMIN_USERNAME', 'ADMIN_PASSWORD',
+        'ADMIN_PASSWORD_HASH', 'SESSION_LIFETIME_MINUTES',
+    ]
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self._saved_env = {k: os.environ.get(k) for k in self.MANAGED_ENV}
+
+        for key in self.MANAGED_ENV:
+            os.environ.pop(key, None)
+
+        os.environ['DATA_DIR'] = self.test_dir
+        os.environ['SECRET_KEY'] = 'test-secret-key-credentials'
+        os.environ['ADMIN_USERNAME'] = 'admin'
+
+    def tearDown(self):
+        import shutil
+
+        # Restore the environment exactly, then reload the module so later
+        # test classes do not inherit this class's configuration. The reload
+        # is done against a scratch DATA_DIR so it never touches /data.
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+        scratch = tempfile.mkdtemp()
+        saved_data_dir = os.environ.get('DATA_DIR')
+        os.environ['DATA_DIR'] = scratch
+        try:
+            from importlib import reload
+            import app as app_module
+            reload(app_module)
+        finally:
+            if saved_data_dir is None:
+                os.environ.pop('DATA_DIR', None)
+            else:
+                os.environ['DATA_DIR'] = saved_data_dir
+            shutil.rmtree(scratch, ignore_errors=True)
+
+        if os.path.exists(self.test_dir):
+            shutil.rmtree(self.test_dir)
+
+    # -- helpers ---------------------------------------------------------
+
+    def load_app(self):
+        """(Re)import app.py with the current environment and return it."""
+        from importlib import reload
+        import app as app_module
+        reload(app_module)
+        app_module.app.config['TESTING'] = True
+        return app_module
+
+    def csrf_token(self, client, path='/login'):
+        import re
+        response = client.get(path)
+        match = re.search(r'name="csrf_token"\s+value="([^"]+)"',
+                          response.data.decode('utf-8'))
+        self.assertIsNotNone(match, f"No CSRF token found on {path}")
+        return match.group(1)
+
+    def attempt_login(self, client, username, password):
+        token = self.csrf_token(client)
+        return client.post('/login', data={
+            'username': username,
+            'password': password,
+            'csrf_token': token,
+        }, follow_redirects=False)
+
+    # -- ADMIN_PASSWORD_HASH ---------------------------------------------
+
+    def test_login_succeeds_with_password_hash(self):
+        """Login works with ADMIN_PASSWORD_HASH and no ADMIN_PASSWORD"""
+        from werkzeug.security import generate_password_hash
+        os.environ['ADMIN_PASSWORD_HASH'] = generate_password_hash('secure123')
+        self.assertNotIn('ADMIN_PASSWORD', os.environ)
+
+        app_module = self.load_app()
+        client = app_module.app.test_client()
+
+        response = self.attempt_login(client, 'admin', 'secure123')
+        self.assertEqual(response.status_code, 302,
+                         "Hashed-password login should redirect on success")
+        self.assertIn('/whitelist', response.location)
+
+    def test_login_fails_with_wrong_password_against_hash(self):
+        """A wrong password is rejected when ADMIN_PASSWORD_HASH is set"""
+        from werkzeug.security import generate_password_hash
+        os.environ['ADMIN_PASSWORD_HASH'] = generate_password_hash('secure123')
+
+        app_module = self.load_app()
+        client = app_module.app.test_client()
+
+        response = self.attempt_login(client, 'admin', 'wrongpassword')
+        self.assertEqual(response.status_code, 200,
+                         "Failed login should re-render the login page")
+        self.assertFalse(app_module.verify_credentials('admin', 'wrongpassword'))
+
+    def test_login_fails_with_wrong_username_against_hash(self):
+        """A wrong username is rejected even with the right password"""
+        from werkzeug.security import generate_password_hash
+        os.environ['ADMIN_PASSWORD_HASH'] = generate_password_hash('secure123')
+
+        app_module = self.load_app()
+        self.assertFalse(app_module.verify_credentials('root', 'secure123'))
+        self.assertTrue(app_module.verify_credentials('admin', 'secure123'))
+
+    def test_malformed_password_hash_denies_without_500(self):
+        """A malformed ADMIN_PASSWORD_HASH denies login and does not crash"""
+        os.environ['ADMIN_PASSWORD_HASH'] = 'not-a-hash'
+
+        app_module = self.load_app()
+        client = app_module.app.test_client()
+
+        response = self.attempt_login(client, 'admin', 'secure123')
+        self.assertEqual(response.status_code, 200,
+                         "Malformed hash must not produce a 500")
+        self.assertFalse(app_module.verify_credentials('admin', 'secure123'))
+        self.assertFalse(app_module.verify_credentials('admin', 'not-a-hash'))
+
+    def test_password_hash_overrides_plaintext_password(self):
+        """ADMIN_PASSWORD_HASH takes precedence over ADMIN_PASSWORD"""
+        from werkzeug.security import generate_password_hash
+        os.environ['ADMIN_PASSWORD_HASH'] = generate_password_hash('hashed-pw')
+        os.environ['ADMIN_PASSWORD'] = 'plaintext-pw'
+
+        app_module = self.load_app()
+        self.assertTrue(app_module.verify_credentials('admin', 'hashed-pw'))
+        self.assertFalse(app_module.verify_credentials('admin', 'plaintext-pw'))
+
+    def test_password_hash_suppresses_default_password_warning(self):
+        """ADMIN_PASSWORD=changeme is irrelevant once a hash is configured"""
+        from werkzeug.security import generate_password_hash
+        os.environ['ADMIN_PASSWORD_HASH'] = generate_password_hash('secure123')
+        os.environ['ADMIN_PASSWORD'] = 'changeme'
+
+        app_module = self.load_app()
+        self.assertFalse(app_module.is_using_default_password(),
+                         "A configured hash overrides the default plaintext password")
+
+    def test_default_password_still_detected_without_hash(self):
+        """Without a hash, the 'changeme' default is still flagged"""
+        os.environ['ADMIN_PASSWORD'] = 'changeme'
+        app_module = self.load_app()
+        self.assertTrue(app_module.is_using_default_password())
+
+    # -- session lifetime -------------------------------------------------
+
+    def test_session_lifetime_defaults_to_480_minutes(self):
+        """PERMANENT_SESSION_LIFETIME defaults to 8 hours"""
+        from datetime import timedelta
+        self.assertNotIn('SESSION_LIFETIME_MINUTES', os.environ)
+
+        app_module = self.load_app()
+        self.assertEqual(app_module.app.config['PERMANENT_SESSION_LIFETIME'],
+                         timedelta(minutes=480))
+
+    def test_session_lifetime_honours_env_var(self):
+        """SESSION_LIFETIME_MINUTES overrides the default"""
+        from datetime import timedelta
+        os.environ['SESSION_LIFETIME_MINUTES'] = '5'
+
+        app_module = self.load_app()
+        self.assertEqual(app_module.app.config['PERMANENT_SESSION_LIFETIME'],
+                         timedelta(minutes=5))
+
+    def test_invalid_session_lifetime_falls_back_to_default(self):
+        """A non-numeric SESSION_LIFETIME_MINUTES does not break startup"""
+        from datetime import timedelta
+        os.environ['SESSION_LIFETIME_MINUTES'] = 'not-a-number'
+
+        app_module = self.load_app()
+        self.assertEqual(app_module.app.config['PERMANENT_SESSION_LIFETIME'],
+                         timedelta(minutes=480))
+
+    # -- session fixation -------------------------------------------------
+
+    def test_login_clears_pre_authentication_session(self):
+        """Values planted before login are discarded (session fixation)"""
+        os.environ['ADMIN_PASSWORD'] = 'secure123'
+        app_module = self.load_app()
+        client = app_module.app.test_client()
+
+        with client.session_transaction() as sess:
+            sess['pre'] = 'attacker-planted'
+
+        response = self.attempt_login(client, 'admin', 'secure123')
+        self.assertEqual(response.status_code, 302)
+
+        with client.session_transaction() as sess:
+            self.assertNotIn('pre', sess,
+                             "Pre-auth session values must be cleared on login")
+            self.assertTrue(sess.get('logged_in'))
+            self.assertEqual(sess.get('username'), 'admin')
+
+    def test_csrf_token_is_rotated_on_login(self):
+        """The pre-auth CSRF token does not survive authentication"""
+        os.environ['ADMIN_PASSWORD'] = 'secure123'
+        app_module = self.load_app()
+        client = app_module.app.test_client()
+
+        pre_token = self.csrf_token(client)
+        response = self.attempt_login(client, 'admin', 'secure123')
+        self.assertEqual(response.status_code, 302)
+
+        post_token = self.csrf_token(client, '/whitelist')
+        self.assertNotEqual(pre_token, post_token,
+                            "CSRF token must be regenerated after login")
+
+    # -- rate limiting across workers/restarts ---------------------------
+
+    def test_rate_limit_persists_across_worker_restart(self):
+        """The 5-attempt limit is shared, not per-process"""
+        os.environ['ADMIN_PASSWORD'] = 'secure123'
+        app_module = self.load_app()
+        app_module.clear_login_attempts()
+
+        client = app_module.app.test_client()
+        for _ in range(app_module.MAX_LOGIN_ATTEMPTS):
+            response = self.attempt_login(client, 'admin', 'wrongpassword')
+            self.assertEqual(response.status_code, 200)
+
+        # Simulate a second gunicorn worker / a container restart: a brand new
+        # process-local state, but the same DATA_DIR.
+        other_worker = self.load_app()
+        self.assertEqual(len(other_worker.login_attempts), 0,
+                         "The in-memory fallback should be empty in a fresh worker")
+
+        other_client = other_worker.app.test_client()
+        response = self.attempt_login(other_client, 'admin', 'wrongpassword')
+        self.assertEqual(response.status_code, 429,
+                         "The 6th attempt must be refused by any worker")
+
+    def test_rate_limit_store_is_written_with_safe_permissions(self):
+        """The shared store lives under DATA_DIR and is mode 0600"""
+        os.environ['ADMIN_PASSWORD'] = 'secure123'
+        app_module = self.load_app()
+        app_module.clear_login_attempts()
+
+        app_module.record_login_attempt('203.0.113.7')
+
+        store = os.path.join(self.test_dir, '.login_attempts.json')
+        self.assertTrue(os.path.exists(store), "Attempt store should be created")
+        self.assertEqual(os.stat(store).st_mode & 0o777, 0o600)
+
+        import json
+        with open(store) as f:
+            data = json.load(f)
+        self.assertIn('203.0.113.7', data)
+        self.assertEqual(len(data['203.0.113.7']), 1)
+
+    def test_expired_attempts_are_pruned(self):
+        """Attempts older than RATE_LIMIT_WINDOW stop counting"""
+        import json
+        app_module = self.load_app()
+        app_module.clear_login_attempts()
+
+        stale = time.time() - (app_module.RATE_LIMIT_WINDOW + 60)
+        store = os.path.join(self.test_dir, '.login_attempts.json')
+        with open(store, 'w') as f:
+            json.dump({'198.51.100.4': [stale] * 10}, f)
+
+        self.assertTrue(app_module.check_rate_limit('198.51.100.4'),
+                        "Stale attempts must not keep an IP locked out")
+
+        with open(store) as f:
+            self.assertNotIn('198.51.100.4', json.load(f))
+
+    def test_clear_login_attempts_removes_store(self):
+        """clear_login_attempts() wipes both the file and the fallback"""
+        app_module = self.load_app()
+        app_module.record_login_attempt('192.0.2.1')
+        store = os.path.join(self.test_dir, '.login_attempts.json')
+        self.assertTrue(os.path.exists(store))
+
+        app_module.clear_login_attempts()
+        self.assertFalse(os.path.exists(store))
+        self.assertEqual(len(app_module.login_attempts), 0)
+        self.assertTrue(app_module.check_rate_limit('192.0.2.1'))
+
+    def test_rate_limit_falls_back_when_store_unwritable(self):
+        """An unusable DATA_DIR degrades to per-process limiting, not a 500"""
+        app_module = self.load_app()
+
+        # Point DATA_DIR at a path that cannot be created (a regular file).
+        blocked = os.path.join(self.test_dir, 'not-a-dir')
+        with open(blocked, 'w') as f:
+            f.write('x')
+        os.environ['DATA_DIR'] = os.path.join(blocked, 'nested')
+        try:
+            app_module.login_attempts.clear()
+            for _ in range(app_module.MAX_LOGIN_ATTEMPTS):
+                self.assertTrue(app_module.check_rate_limit('192.0.2.9'))
+                app_module.record_login_attempt('192.0.2.9')
+            self.assertFalse(app_module.check_rate_limit('192.0.2.9'),
+                             "Fallback limiter must still enforce the limit")
+        finally:
+            os.environ['DATA_DIR'] = self.test_dir
+            app_module.login_attempts.clear()
+
+
 def run_tests():
     """Run all security tests"""
     loader = unittest.TestLoader()
@@ -585,6 +897,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestSecurityHeaders))
     suite.addTests(loader.loadTestsFromTestCase(TestSessionSecurity))
     suite.addTests(loader.loadTestsFromTestCase(TestAuthenticationSecurity))
+    suite.addTests(loader.loadTestsFromTestCase(TestCredentialHardening))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
