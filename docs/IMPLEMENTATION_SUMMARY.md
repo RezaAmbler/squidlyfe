@@ -340,10 +340,10 @@ docker-compose up -d
 - `curl` - HTTP client (for health checks)
 
 ### Python Packages
-- `Flask==3.0.0` - Web framework
-- `Werkzeug==3.0.1` - WSGI utilities
-- `gunicorn==21.2.0` - Production WSGI server
-- `PyYAML==6.0.1` - YAML parsing
+- `Flask==3.1.3` - Web framework
+- `Werkzeug==3.1.8` - WSGI utilities
+- `gunicorn==26.2.0` - Production WSGI server
+- `PyYAML==6.0.3` - YAML parsing
 
 ---
 
