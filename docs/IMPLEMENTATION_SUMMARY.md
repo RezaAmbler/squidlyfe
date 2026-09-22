@@ -331,15 +331,20 @@ docker-compose up -d
 ## 📦 Dependencies
 
 ### System Packages (Debian)
-- `squid` - HTTP proxy server
-- `python3` - Python runtime
-- `python3-pip` - Python package manager
-- `python3-yaml` - YAML support
+- `squid` - HTTP proxy server (6.x on Debian trixie)
+- `python3` - Python runtime (3.13 on Debian trixie)
+- `python3-venv` - virtualenv support for `/opt/venv`
 - `ca-certificates` - SSL certificates
 - `procps` - Process utilities
 - `curl` - HTTP client (for health checks)
+- `gosu` - privilege drop to `appuser` for the web UI
+- `sudo` - lets `appuser` run `squid -k reconfigure` / `squid -k parse`
 
 ### Python Packages
+
+Installed into the image's virtualenv at `/opt/venv` (which is first on `PATH`),
+not into the externally-managed system interpreter.
+
 - `Flask==3.1.3` - Web framework
 - `Werkzeug==3.1.8` - WSGI utilities
 - `gunicorn==26.2.0` - Production WSGI server

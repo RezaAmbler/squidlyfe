@@ -121,8 +121,10 @@ fi
 # {{DNS_NAMESERVERS}} - is substituted exactly once, in one place.
 export DATA_DIR WHITELIST_PATH CONFIG_PATH
 
-# Step 4 of the sprint puts the in-image venv first on PATH; do not hardcode
-# an interpreter path here.
+# The image puts the in-image virtualenv (/opt/venv/bin) first on PATH, so
+# plain `python3` resolves to the venv interpreter that has PyYAML installed.
+# Do not hardcode /usr/bin/python3 here: the system interpreter has no
+# dependencies and the render below would fail with ModuleNotFoundError.
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if ! "$PYTHON_BIN" - <<'PYEOF'
@@ -259,7 +261,9 @@ PARSE_EXIT_CODE=$?
 if [ $PARSE_EXIT_CODE -eq 0 ]; then
     echo "  ✓ Squid configuration is valid"
     # Check for empty ACL warning (informational only)
-    if echo "$PARSE_OUTPUT" | grep -q "Warning: empty ACL"; then
+    # Squid 5 says "Warning: empty ACL", Squid 6 "WARNING: empty ACL" - match
+    # case-insensitively so the informational note survives the version bump.
+    if echo "$PARSE_OUTPUT" | grep -qi "empty ACL"; then
         echo "  ℹ️  Note: Empty whitelist detected (this is OK - deny all mode)"
     fi
 else
@@ -411,7 +415,7 @@ fi
 # appuser uses sudo to send signals to Squid, but may need to read PID file
 chmod -R g+r /var/spool/squid 2>/dev/null || true
 
-exec gosu appuser gunicorn \
+exec gosu appuser /opt/venv/bin/gunicorn \
     --bind 0.0.0.0:8080 \
     --workers 2 \
     --threads 4 \

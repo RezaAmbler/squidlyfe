@@ -178,9 +178,9 @@ Best for: High availability requirements
 ## 🔧 Technical Details
 
 ### Technology Stack
-- **Base OS**: Debian Bookworm Slim
-- **Proxy**: Squid 5.x (from Debian repos)
-- **Backend**: Python 3.11+ with Flask 3.0
+- **Base OS**: Debian Trixie Slim
+- **Proxy**: Squid 6.x (from Debian repos)
+- **Backend**: Python 3.13 with Flask 3.1 (installed into the in-image `/opt/venv` virtualenv)
 - **Frontend**: HTML5, CSS3, vanilla JavaScript
 - **WSGI Server**: Gunicorn (production-ready)
 - **Config Format**: YAML (human-readable)

@@ -146,7 +146,8 @@ traffic with `403`.
 
 `.github/workflows/ci.yml` runs three jobs:
 
-- **`unit`** — Python 3.11 and 3.13 (bookworm's and trixie's interpreters).
+- **`unit`** — Python 3.11 and 3.13 (3.13 is the image interpreter on Debian
+  trixie; 3.11 is kept as the lower bound the code still supports).
   Byte-compiles `app/*.py`, `bash -n`s every shell script, then runs each
   `tests/test_*.py` as its own process.
 - **`audit`** — `pipx run pip-audit --strict -r requirements.txt`. Blocking, on

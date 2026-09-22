@@ -72,6 +72,9 @@ Flask routes and UI logic:
 - `.example.com` (wildcard) - Matches BOTH example.com AND *.example.com
 - Exact and wildcard are NOT duplicates - they have different semantics
 - **Squid 5.7+ REJECTS configs with both exact and wildcard for same domain** (Bug A)
+  - Verified identical on Squid 5.7 (bookworm) and Squid 6.13 (trixie): `squid -k parse`
+    exits 1 with `ERROR: '.example.com' is a subdomain of 'example.com'` followed by
+    `FATAL: Bungled ...`. `filter_conflicts()` remains load-bearing.
 
 ### Normalization Pipeline (app/squid_control.py)
 

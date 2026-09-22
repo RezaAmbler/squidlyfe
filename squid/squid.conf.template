@@ -24,9 +24,10 @@ cache_log /var/log/squid/cache.log
 # ACCESS CONTROL LISTS (ACLs)
 # ==============================================================================
 
-# Define localhost network for health checks and local management
-acl localnet src 127.0.0.1/32
-acl localhost src 127.0.0.1/32
+# `localhost` (127.0.0.1/32 and ::1) is a built-in Squid ACL and is used below
+# for health checks and local management. Do NOT redefine it here: appending
+# 127.0.0.1/32 to the built-in makes Squid 5 and 6 warn
+# "'127.0.0.1' is a subnetwork of '127.0.0.1' ... is ignored" on every parse.
 
 # SSL ports for CONNECT method
 acl SSL_ports port 443

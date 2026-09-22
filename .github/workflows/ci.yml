@@ -20,7 +20,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 = debian bookworm's python, 3.13 = debian trixie's python.
+        # 3.13 = the image interpreter (debian trixie); 3.11 is kept as the
+        # lowest Python version the application still supports.
         python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
