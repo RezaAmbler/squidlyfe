@@ -4,6 +4,9 @@ Provides a web interface for managing Squid proxy whitelist and logging configur
 """
 
 from flask import Flask, render_template, request, redirect, url_for, flash, session, abort
+from werkzeug.security import check_password_hash
+from contextlib import contextmanager
+from datetime import timedelta
 from functools import wraps
 import os
 import logging
@@ -11,6 +14,9 @@ import secrets
 import hmac
 import hashlib
 import re
+import json
+import fcntl
+import tempfile
 from collections import defaultdict
 import time
 
@@ -30,10 +36,20 @@ from squid_control import (
 
 app = Flask(__name__)
 
-# Simple rate limiting for login attempts (in-memory)
+# Rate limiting for login attempts.
+#
+# The authoritative store is a small JSON file under DATA_DIR, guarded by an
+# advisory flock, so the limit is shared by every gunicorn worker and survives
+# a container restart. `login_attempts` below is only a per-process fallback
+# used when that file cannot be read or written (read-only volume, etc.).
 login_attempts = defaultdict(list)
 MAX_LOGIN_ATTEMPTS = 5
 RATE_LIMIT_WINDOW = 300  # 5 minutes
+LOGIN_ATTEMPTS_FILENAME = '.login_attempts.json'
+
+# Set once when we first fall back to the in-memory store, so the warning is
+# logged a single time per worker instead of on every login attempt.
+_rate_limit_fallback_warned = False
 
 
 def get_or_create_secret_key() -> bytes:
@@ -109,6 +125,26 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('DISABLE_SECURE_COOKIES', '
 
 if not app.config['SESSION_COOKIE_SECURE']:
     logger.warning("SESSION_COOKIE_SECURE is disabled. Enable HTTPS/TLS termination for production.")
+
+
+# Security: Bound session lifetime. Flask's default is 31 days, which is far
+# too long for an admin console. Sessions are marked permanent at login, so
+# this is a sliding window (SESSION_REFRESH_EACH_REQUEST defaults to True).
+def _session_lifetime_minutes() -> int:
+    """Read SESSION_LIFETIME_MINUTES, falling back to 480 (8h) if unusable."""
+    raw = os.environ.get('SESSION_LIFETIME_MINUTES', '480')
+    try:
+        minutes = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid SESSION_LIFETIME_MINUTES={raw!r}; using 480")
+        return 480
+    if minutes <= 0:
+        logger.warning(f"SESSION_LIFETIME_MINUTES={minutes} must be positive; using 480")
+        return 480
+    return minutes
+
+
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=_session_lifetime_minutes())
 
 
 # CSRF Protection
@@ -188,17 +224,162 @@ def validate_domain_input(entry: str) -> bool:
     return True
 
 
+# Security: Credential verification
+def verify_credentials(username: str, password: str) -> bool:
+    """
+    Verify admin credentials in constant time.
+
+    ADMIN_PASSWORD_HASH (a werkzeug scrypt/pbkdf2 hash, e.g. from
+    `make password-hash`) takes precedence over the plaintext ADMIN_PASSWORD.
+    Both the username and the password are always compared, and the results
+    are only combined at the end, so the answer does not leak which half was
+    wrong through timing or short-circuiting.
+
+    Args:
+        username: Username supplied by the client
+        password: Password supplied by the client
+
+    Returns:
+        True only if both username and password match.
+    """
+    admin_username = os.environ.get('ADMIN_USERNAME', 'admin')
+    password_hash = os.environ.get('ADMIN_PASSWORD_HASH', '').strip()
+
+    user_ok = hmac.compare_digest(
+        (username or '').encode('utf-8'),
+        admin_username.encode('utf-8')
+    )
+
+    if password_hash:
+        try:
+            pass_ok = check_password_hash(password_hash, password or '')
+        except Exception:
+            # A malformed/unsupported hash must deny access, never 500.
+            logger.error("ADMIN_PASSWORD_HASH is malformed; rejecting login")
+            pass_ok = False
+    else:
+        admin_password = os.environ.get('ADMIN_PASSWORD', 'changeme')
+        pass_ok = hmac.compare_digest(
+            (password or '').encode('utf-8'),
+            admin_password.encode('utf-8')
+        )
+
+    return user_ok and pass_ok
+
+
 # Security: Check if default password is in use
 def is_using_default_password():
     """Check if the admin password is still set to the default 'changeme'"""
+    if os.environ.get('ADMIN_PASSWORD_HASH', '').strip():
+        # A configured hash always overrides ADMIN_PASSWORD, so the default
+        # plaintext value is irrelevant.
+        return False
     admin_password = os.environ.get('ADMIN_PASSWORD', 'changeme')
-    return admin_password == 'changeme'
+    return hmac.compare_digest(admin_password.encode('utf-8'), b'changeme')
 
 
-# Security: Rate limiting for login attempts
+# Security: Rate limiting for login attempts, shared across workers/restarts
+def _login_attempts_path() -> str:
+    """
+    Absolute path of the shared login-attempt store.
+
+    Computed per call rather than at import time because DATA_DIR is set per
+    test and could in principle change between reloads.
+    """
+    return os.path.join(os.environ.get('DATA_DIR', '/data'), LOGIN_ATTEMPTS_FILENAME)
+
+
+def _prune_attempts(attempts: dict, now: float) -> dict:
+    """Drop attempts older than RATE_LIMIT_WINDOW and IPs left with none."""
+    pruned = {}
+    for ip, timestamps in (attempts or {}).items():
+        if not isinstance(timestamps, list):
+            continue
+        kept = [
+            float(t) for t in timestamps
+            if isinstance(t, (int, float)) and now - float(t) < RATE_LIMIT_WINDOW
+        ]
+        if kept:
+            pruned[ip] = kept
+    return pruned
+
+
+def _read_attempts_file(path: str) -> dict:
+    """Read the attempt store; a missing or corrupt file means 'no attempts'."""
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (ValueError, UnicodeDecodeError):
+        logger.warning(f"Login attempt store {path} is corrupt; resetting it")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_attempts_file(path: str, attempts: dict):
+    """Atomically replace the attempt store with 0600 permissions."""
+    directory = os.path.dirname(path) or '.'
+    temp_fd, temp_path = tempfile.mkstemp(dir=directory, prefix='.login_attempts.')
+    try:
+        with os.fdopen(temp_fd, 'w') as f:
+            json.dump(attempts, f)
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+@contextmanager
+def _locked_attempts():
+    """
+    Yield the shared attempt store under an exclusive flock.
+
+    Yields a mutable dict-holding state object; set state['dirty'] = True to
+    have the (pruned) contents written back atomically before the lock drops.
+    Raises OSError if the store is unusable, so callers can fall back.
+    """
+    path = _login_attempts_path()
+    lock_path = path + '.lock'
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        state = {'attempts': _read_attempts_file(path), 'dirty': False}
+        yield state
+        if state['dirty']:
+            _write_attempts_file(path, state['attempts'])
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def _warn_rate_limit_fallback(error: Exception):
+    """Log the degraded-mode warning once per process."""
+    global _rate_limit_fallback_warned
+    if not _rate_limit_fallback_warned:
+        _rate_limit_fallback_warned = True
+        logger.warning(
+            f"Shared login-attempt store unavailable ({error}); falling back to "
+            "per-process rate limiting. The 5-attempt limit is then enforced "
+            "per gunicorn worker instead of globally."
+        )
+
+
 def check_rate_limit(ip_address: str) -> bool:
     """
-    Check if IP address has exceeded login attempt rate limit.
+    Check if IP address has exceeded the login attempt rate limit.
+
+    Reads the shared, file-backed store so the limit holds across gunicorn
+    workers and container restarts.
 
     Args:
         ip_address: Client IP address
@@ -208,22 +389,58 @@ def check_rate_limit(ip_address: str) -> bool:
     """
     now = time.time()
 
-    # Clean old attempts
+    try:
+        with _locked_attempts() as state:
+            pruned = _prune_attempts(state['attempts'], now)
+            if pruned != state['attempts']:
+                state['attempts'] = pruned
+                state['dirty'] = True
+            return len(pruned.get(ip_address, [])) < MAX_LOGIN_ATTEMPTS
+    except Exception as e:
+        _warn_rate_limit_fallback(e)
+
+    # In-memory fallback (per process)
     login_attempts[ip_address] = [
         attempt_time for attempt_time in login_attempts[ip_address]
         if now - attempt_time < RATE_LIMIT_WINDOW
     ]
-
-    # Check if limit exceeded
-    if len(login_attempts[ip_address]) >= MAX_LOGIN_ATTEMPTS:
-        return False
-
-    return True
+    return len(login_attempts[ip_address]) < MAX_LOGIN_ATTEMPTS
 
 
 def record_login_attempt(ip_address: str):
-    """Record a failed login attempt"""
-    login_attempts[ip_address].append(time.time())
+    """Record a failed login attempt in the shared store."""
+    now = time.time()
+
+    try:
+        with _locked_attempts() as state:
+            attempts = _prune_attempts(state['attempts'], now)
+            attempts.setdefault(ip_address, []).append(now)
+            state['attempts'] = attempts
+            state['dirty'] = True
+            return
+    except Exception as e:
+        _warn_rate_limit_fallback(e)
+
+    # In-memory fallback (per process)
+    login_attempts[ip_address].append(now)
+
+
+def clear_login_attempts():
+    """
+    Forget every recorded login attempt.
+
+    Removes the shared store (and its lock file) and clears the in-memory
+    fallback. Intended for tests and for administrative unlocking.
+    """
+    path = _login_attempts_path()
+    for candidate in (path, path + '.lock'):
+        try:
+            os.unlink(candidate)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning(f"Could not remove {candidate}: {e}")
+    login_attempts.clear()
 
 
 # Security: Add security headers to all responses
@@ -284,14 +501,15 @@ def login():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
 
-        # Get credentials from environment variables
-        admin_username = os.environ.get('ADMIN_USERNAME', 'admin')
-        admin_password = os.environ.get('ADMIN_PASSWORD', 'changeme')
-
-        if username == admin_username and password == admin_password:
+        # Constant-time check against ADMIN_PASSWORD_HASH or ADMIN_PASSWORD
+        if verify_credentials(username, password):
+            # Drop every value carried by the pre-authentication session
+            # (including the CSRF token) so a session fixed by an attacker
+            # cannot be promoted to an authenticated one. A fresh CSRF token
+            # is generated on the next render.
+            session.clear()
             session['logged_in'] = True
             session['username'] = username
-            # Regenerate session ID to prevent session fixation
             session.permanent = True
             flash('Successfully logged in!', 'success')
             logger.info(f"User '{username}' logged in successfully from IP {client_ip}")

@@ -49,7 +49,7 @@ http://localhost:8080
 - Username: `admin`
 - Password: `changeme`
 
-⚠️ **IMPORTANT:** Change the default password immediately by setting the `ADMIN_PASSWORD` environment variable!
+⚠️ **IMPORTANT:** Change the default password immediately by setting the `ADMIN_PASSWORD` environment variable — or, better, `ADMIN_PASSWORD_HASH` (see [Storing the Password as a Hash](#storing-the-password-as-a-hash-recommended)).
 
 ### 3. Configure Your Whitelist
 
@@ -88,7 +88,7 @@ Both Squid proxy (port 3128) and Flask web UI (port 8080) run in one container:
 
 1. **Squid Proxy** - Layer-7 domain filtering with whitelist-based ACL, deny-by-default security
 2. **Flask Web UI** - Whitelist management, logging configuration, live log viewer, authentication
-3. **Persistent Storage** - `/data` volume holds whitelist.txt, config.yaml, and session secret
+3. **Persistent Storage** - `/data` volume holds whitelist.txt, config.yaml, the session secret and login rate-limit state
 
 ### Key Features
 
@@ -138,7 +138,9 @@ Configure the container via environment variables in `docker-compose.yml`:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ADMIN_USERNAME` | `admin` | Web UI admin username |
-| `ADMIN_PASSWORD` | `changeme` | Web UI admin password (⚠️ **CHANGE THIS!**) |
+| `ADMIN_PASSWORD` | `changeme` | Web UI admin password, plaintext (⚠️ **CHANGE THIS!**) |
+| `ADMIN_PASSWORD_HASH` | (unset) | **Preferred.** Werkzeug password hash. Takes precedence over `ADMIN_PASSWORD` when set |
+| `SESSION_LIFETIME_MINUTES` | `480` | Session expiry in minutes (8 hours, sliding window) |
 | `SECRET_KEY` | (auto-generated) | Flask session secret key |
 | `DATA_DIR` | `/data` | Persistent data directory |
 | `WHITELIST_PATH` | `/etc/squid/whitelist.txt` | Whitelist file path |
@@ -153,6 +155,7 @@ environment:
   - ADMIN_USERNAME=securityadmin
   - ADMIN_PASSWORD=YourStrongPasswordHere123!
   - SECRET_KEY=your-random-secret-key-here
+  - SESSION_LIFETIME_MINUTES=480
 ```
 
 Then restart:
@@ -161,6 +164,43 @@ Then restart:
 docker-compose down
 docker-compose up -d
 ```
+
+### Storing the Password as a Hash (recommended)
+
+Instead of putting the plaintext password in `docker-compose.yml`, store a
+Werkzeug hash. When `ADMIN_PASSWORD_HASH` is set it **takes precedence** over
+`ADMIN_PASSWORD`, and the "default password" warning banner is suppressed.
+
+Generate one:
+
+```bash
+make password-hash
+# Password: (typed invisibly)
+# scrypt:32768:8:1$Kb1p...$9f2c...
+```
+
+⚠️ **Escaping:** Werkzeug hashes contain `$` characters, and Docker Compose
+performs variable interpolation on its YAML. **Every `$` must be doubled to
+`$$`** in `docker-compose.yml`. Otherwise Compose treats the salt as a variable
+name, substitutes a blank string (`warning: The "Kb1p..." variable is not set`
+at startup — easy to miss) and hands the container a truncated hash, after
+which every login simply fails with "Invalid username or password":
+
+```yaml
+environment:
+  # Note the doubled $$ — this is a Compose escaping rule, not part of the hash
+  - ADMIN_PASSWORD_HASH=scrypt:32768:8:1$$Kb1p...$$9f2c...
+```
+
+With `docker run` there is no interpolation, so pass the hash verbatim inside
+**single** quotes so the shell does not expand it:
+
+```bash
+docker run -e 'ADMIN_PASSWORD_HASH=scrypt:32768:8:1$Kb1p...$9f2c...' ...
+```
+
+A malformed or mis-escaped hash is treated as "deny everything" — the app logs
+`ADMIN_PASSWORD_HASH is malformed; rejecting login` rather than crashing.
 
 ---
 
@@ -374,7 +414,8 @@ squidlyfe/
 ├── data/                      # Runtime persistent storage (excluded from git)
 │   ├── whitelist.txt          # Domain whitelist (auto-managed by UI)
 │   ├── config.yaml            # Application configuration
-│   └── .secret_key            # Flask session secret (auto-generated)
+│   ├── .secret_key            # Flask session secret (auto-generated)
+│   └── .login_attempts.json   # Login rate-limit state (auto-managed, 0600)
 ├── tests/                     # Unit and integration tests
 │   ├── test_whitelist_validation.py
 │   ├── test_flask_ui.py
@@ -453,6 +494,19 @@ chmod -R 755 ./data
 
 - ⚠️ **Change default password immediately**
 - Use strong, unique passwords for production
+- **Prefer `ADMIN_PASSWORD_HASH` over `ADMIN_PASSWORD`** so no plaintext
+  password sits in `docker-compose.yml` or the container's environment.
+  Generate one with `make password-hash` and remember to escape `$` as `$$`
+  in Compose (see [Storing the Password as a Hash](#storing-the-password-as-a-hash-recommended))
+- Credentials are compared in constant time (`hmac.compare_digest`), so a
+  failed login reveals nothing about how much of it was correct
+- **Sessions expire after 8 hours** by default (`SESSION_LIFETIME_MINUTES`).
+  The window slides on each request; the session is cleared and re-established
+  at login, so a session ID planted before authentication cannot be reused
+- **Login lockout: 5 failed attempts per IP within 5 minutes → HTTP 429.**
+  Attempts are recorded in `$DATA_DIR/.login_attempts.json` (mode `0600`,
+  guarded by an advisory `flock`), so the limit is shared by **all gunicorn
+  workers** and **survives a container restart** rather than resetting
 - Consider adding HTTPS/TLS termination via reverse proxy
 
 ### Network Isolation
