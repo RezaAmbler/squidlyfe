@@ -549,7 +549,9 @@ echo "VERSIONS (informational, not a check)"
 hr
 info "squid   : $(dexec squid -v 2>/dev/null | head -1)"
 info "python  : $(dexec python3 -c 'import sys; print(sys.executable, sys.version.split()[0])' 2>/dev/null)"
-info "packages: $(dexec python3 -c 'import flask, werkzeug, gunicorn, yaml; print("flask", flask.__version__, "werkzeug", werkzeug.__version__, "gunicorn", gunicorn.__version__, "pyyaml", yaml.__version__)' 2>/dev/null)"
+# importlib.metadata, not module.__version__: Werkzeug 3.1 dropped the
+# attribute entirely and Flask 3.1 deprecates it.
+info "packages: $(dexec python3 -c 'from importlib.metadata import version; print(" ".join("%s %s" % (p, version(p)) for p in ("Flask", "Werkzeug", "gunicorn", "PyYAML")))' 2>/dev/null)"
 info "image   : $(docker image inspect -f '{{.Size}}' "$IMAGE" 2>/dev/null) bytes"
 
 # ------------------------------------------------------------------ summary ---
