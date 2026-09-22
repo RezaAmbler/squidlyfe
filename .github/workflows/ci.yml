@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 = debian bookworm's python, 3.13 = debian trixie's python.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Byte-compile application sources
+        run: python -m py_compile app/*.py
+
+      - name: Shell syntax check
+        run: |
+          set -e
+          for f in app/entrypoint.sh tests/*.sh scripts/*.sh verify-fix.sh; do
+            [ -e "$f" ] || continue
+            echo "== bash -n $f"
+            bash -n "$f"
+          done
+
+      # Each test file runs as its OWN process on purpose: they mutate os.environ,
+      # monkeypatch module-level paths and importlib.reload(app). Collecting them
+      # into a single pytest process makes that state collide.
+      - name: Unit tests
+        run: |
+          set -e
+          for f in tests/test_*.py; do
+            echo "== $f"
+            python "$f"
+          done
+
+  audit:
+    name: audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Blocking on purpose: CVE hygiene is the point. pip-audit is run via pipx
+      # so it never enters requirements.txt. --strict also fails on packages it
+      # cannot resolve, instead of silently reporting "no known vulnerabilities".
+      - name: pip-audit
+        run: pipx run pip-audit --strict -r requirements.txt
+
+  docker:
+    name: docker e2e
+    needs: unit
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: squidlyfe:ci
+      NAME: squidlyfe-e2e
+      UI_PORT: "18080"
+      PROXY_PORT: "13128"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t "$IMAGE" .
+
+      - name: End-to-end smoke test
+        run: ./tests/test_e2e_smoke.sh
+
+      # The smoke script already dumps `docker logs` + squid.conf + cache.log
+      # before exiting non-zero, and removes the container afterwards. This is a
+      # last-resort net for a failure that kills the script before its own trap.
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs "$NAME" 2>&1 || echo "container already removed by the smoke script"
