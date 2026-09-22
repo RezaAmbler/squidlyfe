@@ -1,7 +1,7 @@
 # Squid Whitelist Proxy - Makefile
 # Common operations for managing the appliance
 
-.PHONY: help build up down restart logs shell squid-logs squid-reload validate clean backup password-hash
+.PHONY: help build up down restart logs shell squid-logs squid-reload validate clean backup password-hash test-unit test-e2e
 
 # Default target
 help:
@@ -20,6 +20,8 @@ help:
 	@echo "  make backup        - Backup whitelist and config"
 	@echo "  make health        - Check container health"
 	@echo "  make test          - Test proxy functionality"
+	@echo "  make test-unit     - Run Python unit tests (each file as its own process)"
+	@echo "  make test-e2e      - Build the image and run the end-to-end smoke test"
 	@echo "  make password-hash - Generate an ADMIN_PASSWORD_HASH value"
 	@echo ""
 
@@ -93,6 +95,25 @@ health:
 	@curl -s http://localhost:8080/health || echo "Health check failed"
 
 # Test proxy functionality
+# Run all Python unit tests. Each file runs as its own process on purpose:
+# they mutate os.environ and importlib.reload(app), so sharing one interpreter
+# makes that state collide.
+# PY can override the interpreter, e.g. `make test-unit PY=.venv/bin/python`.
+PY ?= python3
+
+test-unit:
+	@echo "Running unit tests with $(PY)..."
+	@for f in tests/test_*.py; do \
+		echo "== $$f"; \
+		$(PY) "$$f" || exit 1; \
+	done
+	@echo "All unit tests passed"
+
+# Build the image and run the end-to-end smoke test against it
+test-e2e:
+	docker build -t squidlyfe:ci .
+	IMAGE=squidlyfe:ci ./tests/test_e2e_smoke.sh
+
 test:
 	@echo "Testing proxy functionality..."
 	@echo ""
