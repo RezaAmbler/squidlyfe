@@ -53,6 +53,11 @@ and set `ADMIN_PASSWORD_HASH` instead (it takes precedence over
 
 ```bash
 make password-hash        # prompts, prints e.g. scrypt:32768:8:1$Kb1p...$9f2c...
+
+# Scripting it: only the hash reaches stdout. Pipe the password on stdin if it
+# contains '$' or should stay out of your shell history.
+HASH=$(printf '%s' 'your-password' | make password-hash)
+HASH=$(make password-hash PASSWORD='your-password')   # no '$' in the password
 ```
 
 ```yaml

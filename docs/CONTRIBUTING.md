@@ -275,6 +275,9 @@ make test-e2e
 1. **Change default credentials**. Prefer a hash over a plaintext password:
    ```bash
    make password-hash   # prints e.g. scrypt:32768:8:1$Kb1p...$9f2c...
+
+   # Scriptable: stdout carries only the hash.
+   HASH=$(printf '%s' 'your-password' | make password-hash)
    ```
    ```yaml
    environment:

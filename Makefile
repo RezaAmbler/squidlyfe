@@ -3,6 +3,10 @@
 
 .PHONY: help build up down restart logs shell squid-logs squid-reload validate clean backup password-hash test-unit test-e2e
 
+# GNU make prints "Entering/Leaving directory" on STDOUT under -C or a
+# sub-make, which would corrupt `HASH=$(make password-hash)`.
+MAKEFLAGS += --no-print-directory
+
 # Default target
 help:
 	@echo "Squid Whitelist Proxy - Available Commands"
@@ -22,7 +26,7 @@ help:
 	@echo "  make test          - Test proxy functionality"
 	@echo "  make test-unit     - Run Python unit tests (each file as its own process)"
 	@echo "  make test-e2e      - Build the image and run the end-to-end smoke test"
-	@echo "  make password-hash - Generate an ADMIN_PASSWORD_HASH value"
+	@echo "  make password-hash - Generate an ADMIN_PASSWORD_HASH value (PASSWORD=... or stdin)"
 	@echo ""
 
 # Build the Docker image
@@ -124,11 +128,61 @@ test:
 	@echo "Web UI: http://localhost:8080"
 
 # Generate a password hash for ADMIN_PASSWORD_HASH (no local Python needed).
+# Three ways to supply the password, in precedence order:
+#   printf '%s' 'secret' | make password-hash    # preferred for scripting
+#   make password-hash PASSWORD='secret'         # convenient, but see notes
+#   make password-hash                           # interactive prompt (no echo)
+#
+# Only the hash goes to stdout, so `HASH=$(make password-hash)` is safe; build
+# progress and the prompt go to stderr.
+#
+# PASSWORD= notes: the value is visible in your shell history and in `ps`, and
+# make strips leading whitespace from it. It is read UNEXPANDED via $(value ..)
+# and handed to the container on stdin, never spliced into a shell command, so
+# '$', quotes and backticks are safe. PASSWORD is refused from the environment
+# (too generic a name to trust over stdin) and refused with ':=' (make expands
+# that before it can be read literally).
+#
 # Remember: when pasting the result into docker-compose.yml, every '$' must be
 # doubled to '$$' or Compose will mangle the hash via variable interpolation.
+
+# Unexpanded, command-line-only, exported so the recipe never interpolates it.
+PW_LITERAL := $(if $(filter command line,$(origin PASSWORD)),$(value PASSWORD))
+export PW_LITERAL
+
+PW_HASH_IMAGE ?= squidlyfe:password-hash
+PW_HASH_PY = import sys; from werkzeug.security import generate_password_hash as g; b = sys.stdin.buffer.read().decode("utf-8", "surrogateescape"); b = b[:-1] if b.endswith("\n") else b; b = b[:-1] if b.endswith("\r") else b; sys.exit("ERROR: empty password") if not b else print(g(b))
+
 password-hash:
-	@docker-compose run --rm --no-deps --entrypoint python3 squid-whitelist-proxy \
-		-c "from werkzeug.security import generate_password_hash; import getpass; print(generate_password_hash(getpass.getpass('Password: ')))"
+	@set -eu; \
+	if [ "$(origin PASSWORD)" = "environment" ]; then \
+		echo "ERROR: PASSWORD came from the environment, where it is easy to set by" >&2; \
+		echo "       accident and would silently override stdin. Pass it on the make" >&2; \
+		echo "       command line, or pipe it:" >&2; \
+		echo "         printf '%s' 'your-password' | make password-hash" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$(flavor PASSWORD)" = "simple" ]; then \
+		echo "ERROR: use PASSWORD=... rather than PASSWORD:=... — make expands a" >&2; \
+		echo "       simply-assigned value before it can be read literally, which" >&2; \
+		echo "       would silently hash the wrong password." >&2; \
+		exit 1; \
+	fi; \
+	docker build --quiet -t $(PW_HASH_IMAGE) . >&2; \
+	if [ -n "$${PW_LITERAL:-}" ]; then \
+		printf '%s' "$$PW_LITERAL" \
+			| docker run --rm -i --entrypoint python3 $(PW_HASH_IMAGE) -c '$(PW_HASH_PY)'; \
+	elif [ -t 0 ]; then \
+		printf 'Password: ' >&2; \
+		stty -echo 2>/dev/null || true; \
+		IFS= read -r PW_TYPED || true; \
+		stty echo 2>/dev/null || true; \
+		printf '\n' >&2; \
+		printf '%s' "$${PW_TYPED:-}" \
+			| docker run --rm -i --entrypoint python3 $(PW_HASH_IMAGE) -c '$(PW_HASH_PY)'; \
+	else \
+		docker run --rm -i --entrypoint python3 $(PW_HASH_IMAGE) -c '$(PW_HASH_PY)'; \
+	fi
 
 # View current whitelist
 show-whitelist:

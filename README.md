@@ -199,6 +199,20 @@ make password-hash
 # scrypt:32768:8:1$Kb1p...$9f2c...
 ```
 
+The target is scriptable. Only the hash goes to stdout (build progress and the
+prompt go to stderr), so it can be captured directly:
+
+```bash
+# Preferred for scripts, and the only form that is safe for passwords
+# containing '$': the password never reaches your shell history or `ps`.
+HASH=$(printf '%s' 'your-password' | make password-hash)
+
+# Convenient for one-offs, but the password is visible in shell history and in
+# `ps` while make runs. make also expands '$', so the target refuses to run if
+# your password contains one rather than hashing the wrong string silently.
+HASH=$(make password-hash PASSWORD='your-password')
+```
+
 ⚠️ **Escaping:** Werkzeug hashes contain `$` characters, and Docker Compose
 performs variable interpolation on its YAML. **Every `$` must be doubled to
 `$$`** in `docker-compose.yml`. Otherwise Compose treats the salt as a variable
