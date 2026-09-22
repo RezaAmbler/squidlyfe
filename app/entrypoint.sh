@@ -116,30 +116,41 @@ if [ ! -f "$SQUID_CONFIG_TEMPLATE" ]; then
     exit 1
 fi
 
-# Read logging config from YAML (simple parsing - defaults to local_file)
-LOGGING_MODE=$(grep -A 1 "^logging:" "$CONFIG_PATH" | grep "mode:" | awk '{print $2}' || echo "local_file")
+# Render the config with the same Python renderer the web UI uses
+# (regenerate_squid_config), so every placeholder - including
+# {{DNS_NAMESERVERS}} - is substituted exactly once, in one place.
+export DATA_DIR WHITELIST_PATH CONFIG_PATH
 
-echo "  → Logging mode: $LOGGING_MODE"
+# Step 4 of the sprint puts the in-image venv first on PATH; do not hardcode
+# an interpreter path here.
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
-# Generate logging configuration based on mode
-if [ "$LOGGING_MODE" = "stdout" ]; then
-    LOGGING_CONFIG="access_log stdio:/dev/stdout squid"
-elif [ "$LOGGING_MODE" = "remote_syslog" ]; then
-    SYSLOG_HOST=$(grep "syslog_host:" "$CONFIG_PATH" | awk '{print $2}' | tr -d "'\"" || echo "")
-    SYSLOG_PORT=$(grep "syslog_port:" "$CONFIG_PATH" | awk '{print $2}' | tr -d "'\"" || echo "514")
-    SYSLOG_PROTO=$(grep "syslog_protocol:" "$CONFIG_PATH" | awk '{print $2}' | tr -d "'\"" || echo "udp")
-    LOGGING_CONFIG="# Remote syslog mode: logs to stdout (use external log shipper to forward)
-# Target: ${SYSLOG_PROTO}://${SYSLOG_HOST}:${SYSLOG_PORT}
-access_log stdio:/dev/stdout squid"
-else
-    # Default: local_file
-    LOGGING_CONFIG="access_log /var/log/squid/access.log squid"
+if ! "$PYTHON_BIN" - <<'PYEOF'
+import sys
+sys.path.insert(0, '/app')
+from squid_control import read_logging_config, regenerate_squid_config
+
+cfg = read_logging_config()
+ok, msg = regenerate_squid_config(cfg)
+print("  -> logging mode: {}, dns: {}".format(
+    cfg.get('logging', {}).get('mode', 'local_file'),
+    ' '.join(cfg.get('dns', {}).get('nameservers', []))))
+print("  -> {}".format(msg))
+sys.exit(0 if ok else 1)
+PYEOF
+then
+    echo "ERROR: Failed to render Squid configuration"
+    exit 1
 fi
 
-# Generate squid.conf from template
-sed -e "s|{{LOGGING_CONFIG}}|$LOGGING_CONFIG|g" \
-    -e "s|{{WHITELIST_PATH}}|$WHITELIST_PATH|g" \
-    "$SQUID_CONFIG_TEMPLATE" > "$SQUID_CONFIG_PATH"
+# Fail fast if any template placeholder survived the render. An unsubstituted
+# placeholder is NOT rejected by squid -k parse; it is silently accepted and
+# quietly breaks the affected directive (e.g. DNS resolution) at runtime.
+if grep -q '{{' "$SQUID_CONFIG_PATH"; then
+    echo "ERROR: unresolved template placeholders in $SQUID_CONFIG_PATH:"
+    grep -n '{{' "$SQUID_CONFIG_PATH"
+    exit 1
+fi
 
 chmod 644 "$SQUID_CONFIG_PATH"
 echo "  ✓ Generated Squid config at $SQUID_CONFIG_PATH"
