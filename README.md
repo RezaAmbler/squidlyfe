@@ -98,7 +98,7 @@ Both Squid proxy (port 3128) and Flask web UI (port 8080) run in one container:
 | Base image | `debian:trixie-slim` |
 | Squid | 6.13 (Debian package) |
 | Python | 3.13, in an in-image virtualenv at `/opt/venv` |
-| Flask / Werkzeug | 3.1.3 / 3.1.8 |
+| Flask / Werkzeug | 3.1.3 / 3.1.9 |
 | Gunicorn | 26.2.0 |
 | PyYAML | 6.0.3 |
 

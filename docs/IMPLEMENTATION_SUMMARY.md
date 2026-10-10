@@ -413,7 +413,7 @@ Installed into the image's virtualenv at `/opt/venv` (which is first on `PATH`),
 not into the externally-managed system interpreter.
 
 - `Flask==3.1.3` - Web framework
-- `Werkzeug==3.1.8` - WSGI utilities
+- `Werkzeug==3.1.9` - WSGI utilities
 - `gunicorn==26.2.0` - Production WSGI server
 - `PyYAML==6.0.3` - YAML parsing
 
